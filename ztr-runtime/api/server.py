@@ -22,6 +22,9 @@ JWT_ISSUER = "ztr-runtime"
 JWT_AUDIENCE = "securethecloud"
 JWT_VERSION = "1.0"
 
+POLICY_REVISION = os.environ["POLICY_REVISION"]
+JWT_SECRET_VERSION = os.environ["JWT_SECRET_VERSION"]
+
 r = redis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
@@ -126,6 +129,8 @@ def issue_token(req: TokenIssueRequest):
             "scopes": req.scopes,
             "ttl_seconds": req.ttl_seconds,
             "jwt_ver": JWT_VERSION,
+            "policy_revision": POLICY_REVISION,
+            "secret_version": JWT_SECRET_VERSION,
             "issued_at": now,
             "expires_at": exp,
             "authority_store": "redis",
