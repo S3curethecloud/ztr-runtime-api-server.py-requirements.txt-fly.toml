@@ -92,8 +92,8 @@ def issue_token(req: TokenIssueRequest):
 
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-    # Authority store (Redis is truth)
     session_key = f"ztr:session:{sid}"
+
     r.set(
         session_key,
         str({
@@ -109,12 +109,21 @@ def issue_token(req: TokenIssueRequest):
     )
 
     emit_event(
-        event="token_issued",
-        session_id=sid,
-        principal=req.principal,
-        scopes=req.scopes,
-        graph_version="controlplane.v1.1",
-        timestamp=int(time.time() * 1000)
+        event_type="runtime.token_issued",
+        service="ztr-runtime",
+        correlation_id=sid,
+        payload={
+            "sid": sid,
+            "jti": jti,
+            "principal": req.principal,
+            "intent": req.intent,
+            "scopes": req.scopes,
+            "ttl_seconds": req.ttl_seconds,
+            "jwt_ver": JWT_VERSION,
+            "issued_at": now,
+            "expires_at": exp,
+            "authority_store": "redis",
+        },
     )
 
     return {
@@ -127,7 +136,7 @@ def issue_token(req: TokenIssueRequest):
 
 
 # ---------------------------------------------------------
-# /v1/introspect  (Enforcement Boundary)
+# /v1/introspect
 # ---------------------------------------------------------
 
 @app.post("/v1/introspect")
@@ -154,10 +163,16 @@ def introspect(req: IntrospectionRequest):
         raise HTTPException(status_code=401, detail="Session revoked")
 
     emit_event(
-        event="token_introspected",
-        session_id=sid,
-        principal=decoded.get("sub"),
-        timestamp=int(time.time() * 1000)
+        event_type="runtime.token_introspected",
+        service="ztr-runtime",
+        correlation_id=sid,
+        payload={
+            "sid": sid,
+            "principal": decoded.get("sub"),
+            "result": "active",
+            "jwt_ver": decoded.get("ver"),
+            "redis_present": True,
+        },
     )
 
     return {
@@ -181,12 +196,18 @@ def propagate_revocation(req: RevocationRequest):
     deleted = r.delete(redis_key)
 
     emit_event(
-        event="session_revoked",
-        session_id=req.session_id,
-        decision_hash=req.decision_hash,
-        reason=req.decision.get("reason"),
-        confidence=req.decision.get("confidence"),
-        timestamp=int(time.time() * 1000)
+        event_type="runtime.session_revoked",
+        service="ztr-runtime",
+        correlation_id=req.session_id,
+        payload={
+            "sid": req.session_id,
+            "incident_id": req.incident_id,
+            "decision_hash": req.decision_hash,
+            "deleted": bool(deleted),
+            "redis_key": redis_key,
+            "reason": req.decision.get("reason"),
+            "confidence": req.decision.get("confidence"),
+        },
     )
 
     return {
