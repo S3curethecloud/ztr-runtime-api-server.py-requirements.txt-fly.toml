@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from redis import Redis
 import os, time, json, uuid
 import jwt
+from audit_chain import emit_event
 
 app = FastAPI(title="Zero Trust Runtime")
 
@@ -93,6 +94,24 @@ def issue_token(req: TokenIssueRequest):
     # Store authority in Redis with TTL
     r.set(session_key, json.dumps(session_value))
     r.expire(session_key, ttl)
+
+    emit_event(
+        event_type="runtime.token_issued",
+        service="ztr-runtime",
+        correlation_id=session_id,
+        payload={
+            "sid": session_id,
+            "jti": jti,
+            "principal": req.principal,
+            "intent": req.intent,
+            "scopes": req.scopes,
+            "ttl_seconds": ttl,
+            "jwt_ver": "1.0",
+            "authority_store": "redis",
+            "issued_at": now,
+            "expires_at": now + ttl,
+        },
+    )
 
     # Mint JWT that references the Redis session_id (authority source)
     claims = {
