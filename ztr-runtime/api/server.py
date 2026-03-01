@@ -1,5 +1,5 @@
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 import redis
 import time
 import os
@@ -34,6 +34,8 @@ r = redis.Redis(
 # ---------------------------------------------------------
 
 class TokenIssueRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     principal: str
     intent: str
     scopes: list[str]
@@ -42,10 +44,14 @@ class TokenIssueRequest(BaseModel):
 
 
 class IntrospectionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     token: str
 
 
 class RevocationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     source: str
     event_type: str
     incident_id: str
