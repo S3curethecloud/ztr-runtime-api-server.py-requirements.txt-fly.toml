@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import time
+import redis
 from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------
@@ -17,11 +18,28 @@ SCHEMA_VERSION = "stc.audit.v1"
 DEFAULT_ENV = os.getenv("APP_ENV", "prod")
 GENESIS_HASH = os.getenv("AUDIT_CHAIN_GENESIS", "0" * 64)
 
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+
+_AUDIT_REDIS = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    password=REDIS_PASSWORD,
+    decode_responses=True
+)
+
 # ---------------------------------------------------------
 # In-Memory Chain State (per process)
 # ---------------------------------------------------------
 _LOCK = threading.Lock()
-_PREVIOUS_HASH = GENESIS_HASH
+
+try:
+    stored_head = _AUDIT_REDIS.get("ztr:audit:head")
+except Exception:
+    stored_head = None
+
+_PREVIOUS_HASH = stored_head or GENESIS_HASH
 
 
 # ---------------------------------------------------------
@@ -97,6 +115,11 @@ def emit_event(
         prev_hash = _PREVIOUS_HASH
         event_hash = _sha256(_canonical(base_event) + prev_hash)
         _PREVIOUS_HASH = event_hash
+
+        try:
+            _AUDIT_REDIS.set("ztr:audit:head", event_hash)
+        except Exception:
+            pass  # Do not break runtime if audit persistence fails
 
     envelope = {
         **base_event,
