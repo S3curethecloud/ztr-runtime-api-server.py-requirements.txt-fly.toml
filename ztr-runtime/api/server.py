@@ -91,9 +91,9 @@ def audit_index(event_type: str, limit: int = 50):
     }
 
 
-@app.get("/v1/audit/entry/{entry_hash}")
-def audit_entry(entry_hash: str):
-    entry = get_entry(entry_hash)
+@app.get("/v1/audit/entry/{event_hash}")
+def audit_entry(event_hash: str):
+    entry = get_entry(event_hash)
     if not entry:
         raise HTTPException(status_code=404, detail="audit_entry_not_found")
     return entry
@@ -189,7 +189,6 @@ def introspect(req: IntrospectionRequest):
             audience=JWT_AUDIENCE
         )
     except Exception:
-        # Optional: could emit runtime.introspect_denied here, but correlation is unknown.
         raise HTTPException(status_code=401, detail="Invalid token")
 
     if decoded.get("ver") != JWT_VERSION:

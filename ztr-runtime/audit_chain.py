@@ -1,16 +1,12 @@
 # =========================================================
-# FILE: audit_chain.py
-# PURPOSE: Governance-grade tamper-evident audit log (hash chain)
+# SecureTheCloud — Deterministic Audit Chain (Phase 4)
+# Schema: stc.audit.v1
 # GOVERNANCE: MGF — AUTHORITY-ALL
 #
-# DESIGN:
-#  - Canonical JSON (sort_keys + compact separators)
-#  - Hash chain: entry_hash = sha256(prev_hash + canonical_entry_json)
-#  - Store:
-#      - ztr:audit:chain_head -> latest entry_hash
-#      - ztr:audit:index:all -> list of entry_hash in append order
-#      - ztr:audit:index:<event_type> -> per-type index
-#      - ztr:audit:entry:<entry_hash> -> full entry record
+# Upgrade (Phase 4):
+#   - Store every event entry in Redis (replayable)
+#   - Maintain indexes for retrieval
+#   - Maintain hash-chain head (tamper-evident)
 # =========================================================
 
 from __future__ import annotations
@@ -18,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import threading
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -25,116 +22,122 @@ from typing import Any, Dict, Optional
 import redis
 from redis.exceptions import WatchError
 
+# ---------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------
+SCHEMA_VERSION = "stc.audit.v1"
+DEFAULT_ENV = os.getenv("APP_ENV", "prod")
+GENESIS_HASH = os.getenv("AUDIT_CHAIN_GENESIS", "0" * 64)
 
-# ---------------------------------------------------------
-# Redis client (same env contract as runtime)
-# ---------------------------------------------------------
+# Use SAME Redis contract as runtime
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 
-_r = redis.Redis(
+# ---------------------------------------------------------
+# Redis keys
+# ---------------------------------------------------------
+AUDIT_HEAD_KEY = "ztr:audit:head"
+AUDIT_INDEX_ALL = "ztr:audit:index:all"
+AUDIT_INDEX_PREFIX = "ztr:audit:index:"          # ztr:audit:index:<event_type>
+AUDIT_ENTRY_PREFIX = "ztr:audit:entry:"          # ztr:audit:entry:<event_hash>
+
+# ---------------------------------------------------------
+# Redis client
+# ---------------------------------------------------------
+_audit_redis = redis.Redis(
     host=REDIS_HOST,
     port=REDIS_PORT,
     password=REDIS_PASSWORD,
     decode_responses=True,
 )
 
-
-# ---------------------------------------------------------
-# Keys
-# ---------------------------------------------------------
-CHAIN_HEAD_KEY = "ztr:audit:chain_head"
-INDEX_ALL_KEY = "ztr:audit:index:all"
-ENTRY_KEY_PREFIX = "ztr:audit:entry:"          # ztr:audit:entry:<hash>
-INDEX_TYPE_PREFIX = "ztr:audit:index:"         # ztr:audit:index:<event_type>
-
-GENESIS_HASH = ""  # deterministic genesis
+_LOCK = threading.Lock()
 
 
-def _canonical_json(obj: Dict[str, Any]) -> str:
-    # stable ordering + compact output
-    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
+def _canonical(obj: Any) -> str:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _sha256_hex(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+def _sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def emit_event(
     *,
     event_type: str,
     service: str,
-    correlation_id: str,
     payload: Dict[str, Any],
+    correlation_id: Optional[str] = None,
+    env: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Append an audit event using a tamper-evident hash chain.
-
-    Returns:
-      {
-        "entry_hash": ...,
-        "prev_hash": ...,
-        "chain_head": ...,
-        "timestamp_ms": ...
-      }
+    Stores:
+      - head hash
+      - entry record (by hash)
+      - indexes (all + per event_type)
+    Returns the full envelope (incl hashes).
     """
 
-    ts_ms = int(time.time() * 1000)
+    if not event_type:
+        raise ValueError("event_type required")
+    if not service:
+        raise ValueError("service required")
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be dict")
 
-    base_entry: Dict[str, Any] = {
+    env = env or DEFAULT_ENV
+
+    base_event = {
+        "schema": SCHEMA_VERSION,
         "event_id": str(uuid.uuid4()),
         "event_type": event_type,
+        "ts_ms": int(time.time() * 1000),
         "service": service,
+        "env": env,
         "correlation_id": correlation_id,
-        "timestamp_ms": ts_ms,
         "payload": payload,
-        # prev_hash added inside atomic loop
     }
 
     # -----------------------------------------------------
-    # Best-effort atomic append with WATCH (single-tenant safe)
+    # Multi-machine safe: WATCH head, compute, commit
     # -----------------------------------------------------
     for _ in range(5):
         try:
-            with _r.pipeline() as pipe:
-                pipe.watch(CHAIN_HEAD_KEY)
+            with _audit_redis.pipeline() as pipe:
+                pipe.watch(AUDIT_HEAD_KEY)
 
-                prev_hash = pipe.get(CHAIN_HEAD_KEY) or GENESIS_HASH
+                prev_hash = pipe.get(AUDIT_HEAD_KEY) or GENESIS_HASH
 
-                entry_for_hash = dict(base_entry)
-                entry_for_hash["prev_hash"] = prev_hash
+                # IMPORTANT: keep deterministic ordering
+                envelope = dict(base_event)
+                envelope["prev_hash"] = prev_hash
 
-                canonical = _canonical_json(entry_for_hash)
-                entry_hash = _sha256_hex(prev_hash + canonical)
+                # Deterministic hash (same style as your Phase 3 chain)
+                event_hash = _sha256(_canonical(envelope) + prev_hash)
+                envelope["event_hash"] = event_hash
 
-                full_entry = dict(entry_for_hash)
-                full_entry["entry_hash"] = entry_hash
-
-                # Store entry + update head + indexes
                 pipe.multi()
-                pipe.set(CHAIN_HEAD_KEY, entry_hash)
-                pipe.rpush(INDEX_ALL_KEY, entry_hash)
-                pipe.rpush(INDEX_TYPE_PREFIX + event_type, entry_hash)
-                pipe.set(ENTRY_KEY_PREFIX + entry_hash, _canonical_json(full_entry))
+                pipe.set(AUDIT_HEAD_KEY, event_hash)
+                pipe.rpush(AUDIT_INDEX_ALL, event_hash)
+                pipe.rpush(AUDIT_INDEX_PREFIX + event_type, event_hash)
+                pipe.set(AUDIT_ENTRY_PREFIX + event_hash, _canonical(envelope))
                 pipe.execute()
 
-                return {
-                    "entry_hash": entry_hash,
-                    "prev_hash": prev_hash,
-                    "chain_head": entry_hash,
-                    "timestamp_ms": ts_ms,
-                }
+                # keep stdout telemetry (still useful)
+                print(_canonical(envelope), flush=True)
+
+                return envelope
 
         except WatchError:
             continue
 
-    # If contention persists (unlikely single-tenant), fail deterministically
     raise RuntimeError("audit_chain_append_failed")
 
 
-def get_entry(entry_hash: str) -> Optional[Dict[str, Any]]:
-    raw = _r.get(ENTRY_KEY_PREFIX + entry_hash)
+def get_entry(event_hash: str) -> Optional[Dict[str, Any]]:
+    raw = _audit_redis.get(AUDIT_ENTRY_PREFIX + event_hash)
     if not raw:
         return None
     return json.loads(raw)
@@ -142,63 +145,56 @@ def get_entry(entry_hash: str) -> Optional[Dict[str, Any]]:
 
 def list_index(event_type: str = "all", limit: int = 50) -> list[str]:
     if event_type == "all":
-        key = INDEX_ALL_KEY
+        key = AUDIT_INDEX_ALL
     else:
-        key = INDEX_TYPE_PREFIX + event_type
+        key = AUDIT_INDEX_PREFIX + event_type
 
-    # newest first (right side)
-    hashes = _r.lrange(key, max(0, _r.llen(key) - limit), -1)
+    total = _audit_redis.llen(key)
+    if total <= 0:
+        return []
+
+    start = max(0, total - limit)
+    hashes = _audit_redis.lrange(key, start, -1)
     return list(reversed(hashes))
 
 
 def verify_chain(limit: int = 5000) -> Dict[str, Any]:
-    """
-    Verify the audit hash chain for the last N entries (default: 5000).
-    """
-    total = _r.llen(INDEX_ALL_KEY)
+    total = _audit_redis.llen(AUDIT_INDEX_ALL)
     if total == 0:
         return {"status": "valid", "events_verified": 0, "reason": "empty"}
 
     start = max(0, total - limit)
-    hashes = _r.lrange(INDEX_ALL_KEY, start, -1)
+    hashes = _audit_redis.lrange(AUDIT_INDEX_ALL, start, -1)
 
     prev_hash = GENESIS_HASH
     for h in hashes:
         entry = get_entry(h)
         if not entry:
-            return {"status": "broken", "reason": "missing_entry", "entry_hash": h}
+            return {"status": "broken", "reason": "missing_entry", "event_hash": h}
 
         if entry.get("prev_hash") != prev_hash:
             return {
                 "status": "broken",
                 "reason": "prev_hash_mismatch",
-                "entry_hash": h,
+                "event_hash": h,
                 "expected_prev": prev_hash,
                 "found_prev": entry.get("prev_hash"),
             }
 
-        # recompute hash
-        entry_for_hash = {
-            "event_id": entry["event_id"],
-            "event_type": entry["event_type"],
-            "service": entry["service"],
-            "correlation_id": entry["correlation_id"],
-            "timestamp_ms": entry["timestamp_ms"],
-            "payload": entry["payload"],
-            "prev_hash": entry["prev_hash"],
-        }
-        canonical = _canonical_json(entry_for_hash)
-        recalculated = _sha256_hex(prev_hash + canonical)
+        # recompute
+        candidate = dict(entry)
+        candidate.pop("event_hash", None)
 
-        if recalculated != entry.get("entry_hash"):
+        recalculated = _sha256(_canonical(candidate) + prev_hash)
+        if recalculated != entry.get("event_hash"):
             return {
                 "status": "broken",
                 "reason": "hash_mismatch",
-                "entry_hash": h,
+                "event_hash": h,
                 "expected": recalculated,
-                "found": entry.get("entry_hash"),
+                "found": entry.get("event_hash"),
             }
 
-        prev_hash = entry["entry_hash"]
+        prev_hash = entry["event_hash"]
 
     return {"status": "valid", "events_verified": len(hashes), "chain_head": prev_hash}
