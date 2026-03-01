@@ -6,7 +6,7 @@ import os
 import uuid
 import jwt
 
-from audit_chain import emit_event
+from audit_chain import emit_event, verify_chain, list_index, get_entry
 
 app = FastAPI(title="Zero Trust Runtime")
 
@@ -74,6 +74,32 @@ def health():
 
 
 # ---------------------------------------------------------
+# Phase 4 — Audit endpoints (read-only)
+# ---------------------------------------------------------
+
+@app.get("/v1/audit/verify")
+def audit_verify(limit: int = 5000):
+    return verify_chain(limit=limit)
+
+
+@app.get("/v1/audit/index/{event_type}")
+def audit_index(event_type: str, limit: int = 50):
+    return {
+        "event_type": event_type,
+        "limit": limit,
+        "hashes": list_index(event_type=event_type, limit=limit),
+    }
+
+
+@app.get("/v1/audit/entry/{entry_hash}")
+def audit_entry(entry_hash: str):
+    entry = get_entry(entry_hash)
+    if not entry:
+        raise HTTPException(status_code=404, detail="audit_entry_not_found")
+    return entry
+
+
+# ---------------------------------------------------------
 # /v1/tokens:issue
 # ---------------------------------------------------------
 
@@ -117,7 +143,7 @@ def issue_token(req: TokenIssueRequest):
         ex=req.ttl_seconds
     )
 
-    emit_event(
+    audit = emit_event(
         event_type="runtime.token_issued",
         service="ztr-runtime",
         correlation_id=sid,
@@ -142,7 +168,8 @@ def issue_token(req: TokenIssueRequest):
         "token_type": "Bearer",
         "expires_in": req.ttl_seconds,
         "session_id": sid,
-        "jti": jti
+        "jti": jti,
+        "audit": audit,
     }
 
 
@@ -162,6 +189,7 @@ def introspect(req: IntrospectionRequest):
             audience=JWT_AUDIENCE
         )
     except Exception:
+        # Optional: could emit runtime.introspect_denied here, but correlation is unknown.
         raise HTTPException(status_code=401, detail="Invalid token")
 
     if decoded.get("ver") != JWT_VERSION:
@@ -171,9 +199,21 @@ def introspect(req: IntrospectionRequest):
     session_key = f"ztr:session:{sid}"
 
     if not r.exists(session_key):
+        audit = emit_event(
+            event_type="runtime.token_introspected",
+            service="ztr-runtime",
+            correlation_id=sid,
+            payload={
+                "sid": sid,
+                "principal": decoded.get("sub"),
+                "result": "revoked",
+                "jwt_ver": decoded.get("ver"),
+                "redis_present": False,
+            },
+        )
         raise HTTPException(status_code=401, detail="Session revoked")
 
-    emit_event(
+    audit = emit_event(
         event_type="runtime.token_introspected",
         service="ztr-runtime",
         correlation_id=sid,
@@ -192,7 +232,8 @@ def introspect(req: IntrospectionRequest):
         "principal": decoded.get("sub"),
         "scopes": decoded.get("scopes"),
         "intent": decoded.get("intent"),
-        "expires_at": decoded.get("exp")
+        "expires_at": decoded.get("exp"),
+        "audit": audit,
     }
 
 
@@ -206,7 +247,7 @@ def propagate_revocation(req: RevocationRequest):
     redis_key = f"ztr:session:{req.session_id}"
     deleted = r.delete(redis_key)
 
-    emit_event(
+    audit = emit_event(
         event_type="runtime.session_revoked",
         service="ztr-runtime",
         correlation_id=req.session_id,
@@ -224,5 +265,6 @@ def propagate_revocation(req: RevocationRequest):
     return {
         "status": "ok",
         "deleted": bool(deleted),
-        "redis_key": redis_key
+        "redis_key": redis_key,
+        "audit": audit,
     }

@@ -1,172 +1,204 @@
 # =========================================================
-# SecureTheCloud — Deterministic Audit Chain (Phase 4)
-# Schema: stc.audit.v1
+# FILE: audit_chain.py
+# PURPOSE: Governance-grade tamper-evident audit log (hash chain)
+# GOVERNANCE: MGF — AUTHORITY-ALL
+#
+# DESIGN:
+#  - Canonical JSON (sort_keys + compact separators)
+#  - Hash chain: entry_hash = sha256(prev_hash + canonical_entry_json)
+#  - Store:
+#      - ztr:audit:chain_head -> latest entry_hash
+#      - ztr:audit:index:all -> list of entry_hash in append order
+#      - ztr:audit:index:<event_type> -> per-type index
+#      - ztr:audit:entry:<entry_hash> -> full entry record
 # =========================================================
+
+from __future__ import annotations
 
 import hashlib
 import json
 import os
-import threading
 import time
-import redis
+import uuid
 from typing import Any, Dict, Optional
 
-# ---------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------
-SCHEMA_VERSION = "stc.audit.v1"
-DEFAULT_ENV = os.getenv("APP_ENV", "prod")
-GENESIS_HASH = os.getenv("AUDIT_CHAIN_GENESIS", "0" * 64)
-
-AUDIT_REDIS_URL = os.getenv("REDIS_AUDIT_URL")
-AUDIT_HEAD_KEY = "ztr:audit:head"
-
-_audit_redis = None
-_FALLBACK_BUFFER = []
-
-# ---------------------------------------------------------
-# In-Memory Chain State (per process)
-# ---------------------------------------------------------
-_LOCK = threading.Lock()
-_PREVIOUS_HASH = GENESIS_HASH
+import redis
+from redis.exceptions import WatchError
 
 
 # ---------------------------------------------------------
-# Deterministic JSON Canonicalizer
+# Redis client (same env contract as runtime)
 # ---------------------------------------------------------
-def _canonical(obj: Any) -> str:
-    """
-    Deterministic JSON:
-    - Sorted keys
-    - No whitespace
-    - UTF-8 safe
-    """
-    return json.dumps(
-        obj,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+
+_r = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    password=REDIS_PASSWORD,
+    decode_responses=True,
+)
 
 
 # ---------------------------------------------------------
-# Redis Initialization
+# Keys
 # ---------------------------------------------------------
-def _init_audit_redis():
-    global _audit_redis, _PREVIOUS_HASH
+CHAIN_HEAD_KEY = "ztr:audit:chain_head"
+INDEX_ALL_KEY = "ztr:audit:index:all"
+ENTRY_KEY_PREFIX = "ztr:audit:entry:"          # ztr:audit:entry:<hash>
+INDEX_TYPE_PREFIX = "ztr:audit:index:"         # ztr:audit:index:<event_type>
 
-    if not AUDIT_REDIS_URL:
-        print(
-            _canonical({
-                "event_type": "audit.redis_not_configured",
-                "severity": "WARNING",
-                "ts_ms": int(time.time() * 1000)
-            }),
-            flush=True
-        )
-        return
-
-    try:
-        _audit_redis = redis.from_url(AUDIT_REDIS_URL, decode_responses=True)
-        stored_head = _audit_redis.get(AUDIT_HEAD_KEY)
-        if stored_head:
-            _PREVIOUS_HASH = stored_head
-    except Exception:
-        print(
-            _canonical({
-                "event_type": "audit.redis_connection_failed",
-                "severity": "CRITICAL",
-                "ts_ms": int(time.time() * 1000)
-            }),
-            flush=True
-        )
+GENESIS_HASH = ""  # deterministic genesis
 
 
-_init_audit_redis()
+def _canonical_json(obj: Dict[str, Any]) -> str:
+    # stable ordering + compact output
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"))
 
 
-# ---------------------------------------------------------
-# SHA256 Helper
-# ---------------------------------------------------------
-def _sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def _sha256_hex(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------
-# Core Emit Function
-# ---------------------------------------------------------
 def emit_event(
     *,
     event_type: str,
     service: str,
+    correlation_id: str,
     payload: Dict[str, Any],
-    correlation_id: Optional[str] = None,
-    env: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """
+    Append an audit event using a tamper-evident hash chain.
 
-    global _PREVIOUS_HASH
+    Returns:
+      {
+        "entry_hash": ...,
+        "prev_hash": ...,
+        "chain_head": ...,
+        "timestamp_ms": ...
+      }
+    """
 
-    if not event_type:
-        raise ValueError("event_type required")
+    ts_ms = int(time.time() * 1000)
 
-    if not service:
-        raise ValueError("service required")
-
-    if not isinstance(payload, dict):
-        raise ValueError("payload must be dict")
-
-    env = env or DEFAULT_ENV
-
-    base_event = {
-        "schema": SCHEMA_VERSION,
+    base_entry: Dict[str, Any] = {
+        "event_id": str(uuid.uuid4()),
         "event_type": event_type,
-        "ts_ms": int(time.time() * 1000),
         "service": service,
-        "env": env,
         "correlation_id": correlation_id,
+        "timestamp_ms": ts_ms,
         "payload": payload,
+        # prev_hash added inside atomic loop
     }
 
-    with _LOCK:
-        prev_hash = _PREVIOUS_HASH
-        event_hash = _sha256(_canonical(base_event) + prev_hash)
+    # -----------------------------------------------------
+    # Best-effort atomic append with WATCH (single-tenant safe)
+    # -----------------------------------------------------
+    for _ in range(5):
+        try:
+            with _r.pipeline() as pipe:
+                pipe.watch(CHAIN_HEAD_KEY)
 
-        _PREVIOUS_HASH = event_hash
+                prev_hash = pipe.get(CHAIN_HEAD_KEY) or GENESIS_HASH
 
-        if _audit_redis:
-            try:
-                _audit_redis.set(AUDIT_HEAD_KEY, event_hash)
-            except Exception:
-                _FALLBACK_BUFFER.append(event_hash)
-                print(
-                    _canonical({
-                        "event_type": "audit_chain_unavailable",
-                        "severity": "CRITICAL",
-                        "event_hash": event_hash,
-                        "ts_ms": int(time.time() * 1000)
-                    }),
-                    flush=True
-                )
+                entry_for_hash = dict(base_entry)
+                entry_for_hash["prev_hash"] = prev_hash
 
-    envelope = {
-        **base_event,
-        "prev_hash": prev_hash,
-        "event_hash": event_hash,
-    }
+                canonical = _canonical_json(entry_for_hash)
+                entry_hash = _sha256_hex(prev_hash + canonical)
 
-    print(_canonical(envelope), flush=True)
+                full_entry = dict(entry_for_hash)
+                full_entry["entry_hash"] = entry_hash
 
-    return envelope
+                # Store entry + update head + indexes
+                pipe.multi()
+                pipe.set(CHAIN_HEAD_KEY, entry_hash)
+                pipe.rpush(INDEX_ALL_KEY, entry_hash)
+                pipe.rpush(INDEX_TYPE_PREFIX + event_type, entry_hash)
+                pipe.set(ENTRY_KEY_PREFIX + entry_hash, _canonical_json(full_entry))
+                pipe.execute()
 
+                return {
+                    "entry_hash": entry_hash,
+                    "prev_hash": prev_hash,
+                    "chain_head": entry_hash,
+                    "timestamp_ms": ts_ms,
+                }
 
-# ---------------------------------------------------------
-# Optional: Chain State Introspection (Debug Only)
-# ---------------------------------------------------------
-def get_current_chain_head() -> str:
-    return _PREVIOUS_HASH
+        except WatchError:
+            continue
+
+    # If contention persists (unlikely single-tenant), fail deterministically
+    raise RuntimeError("audit_chain_append_failed")
 
 
-def reset_chain(genesis: Optional[str] = None) -> None:
-    global _PREVIOUS_HASH
-    with _LOCK:
-        _PREVIOUS_HASH = genesis or GENESIS_HASH
+def get_entry(entry_hash: str) -> Optional[Dict[str, Any]]:
+    raw = _r.get(ENTRY_KEY_PREFIX + entry_hash)
+    if not raw:
+        return None
+    return json.loads(raw)
+
+
+def list_index(event_type: str = "all", limit: int = 50) -> list[str]:
+    if event_type == "all":
+        key = INDEX_ALL_KEY
+    else:
+        key = INDEX_TYPE_PREFIX + event_type
+
+    # newest first (right side)
+    hashes = _r.lrange(key, max(0, _r.llen(key) - limit), -1)
+    return list(reversed(hashes))
+
+
+def verify_chain(limit: int = 5000) -> Dict[str, Any]:
+    """
+    Verify the audit hash chain for the last N entries (default: 5000).
+    """
+    total = _r.llen(INDEX_ALL_KEY)
+    if total == 0:
+        return {"status": "valid", "events_verified": 0, "reason": "empty"}
+
+    start = max(0, total - limit)
+    hashes = _r.lrange(INDEX_ALL_KEY, start, -1)
+
+    prev_hash = GENESIS_HASH
+    for h in hashes:
+        entry = get_entry(h)
+        if not entry:
+            return {"status": "broken", "reason": "missing_entry", "entry_hash": h}
+
+        if entry.get("prev_hash") != prev_hash:
+            return {
+                "status": "broken",
+                "reason": "prev_hash_mismatch",
+                "entry_hash": h,
+                "expected_prev": prev_hash,
+                "found_prev": entry.get("prev_hash"),
+            }
+
+        # recompute hash
+        entry_for_hash = {
+            "event_id": entry["event_id"],
+            "event_type": entry["event_type"],
+            "service": entry["service"],
+            "correlation_id": entry["correlation_id"],
+            "timestamp_ms": entry["timestamp_ms"],
+            "payload": entry["payload"],
+            "prev_hash": entry["prev_hash"],
+        }
+        canonical = _canonical_json(entry_for_hash)
+        recalculated = _sha256_hex(prev_hash + canonical)
+
+        if recalculated != entry.get("entry_hash"):
+            return {
+                "status": "broken",
+                "reason": "hash_mismatch",
+                "entry_hash": h,
+                "expected": recalculated,
+                "found": entry.get("entry_hash"),
+            }
+
+        prev_hash = entry["entry_hash"]
+
+    return {"status": "valid", "events_verified": len(hashes), "chain_head": prev_hash}
