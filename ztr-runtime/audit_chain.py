@@ -18,28 +18,17 @@ SCHEMA_VERSION = "stc.audit.v1"
 DEFAULT_ENV = os.getenv("APP_ENV", "prod")
 GENESIS_HASH = os.getenv("AUDIT_CHAIN_GENESIS", "0" * 64)
 
-REDIS_HOST = os.getenv("REDIS_HOST")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+AUDIT_REDIS_URL = os.getenv("REDIS_AUDIT_URL")
+AUDIT_HEAD_KEY = "ztr:audit:head"
 
-_AUDIT_REDIS = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
-    decode_responses=True
-)
+_audit_redis = None
+_FALLBACK_BUFFER = []
 
 # ---------------------------------------------------------
 # In-Memory Chain State (per process)
 # ---------------------------------------------------------
 _LOCK = threading.Lock()
-
-try:
-    stored_head = _AUDIT_REDIS.get("ztr:audit:head")
-except Exception:
-    stored_head = None
-
-_PREVIOUS_HASH = stored_head or GENESIS_HASH
+_PREVIOUS_HASH = GENESIS_HASH
 
 
 # ---------------------------------------------------------
@@ -61,6 +50,42 @@ def _canonical(obj: Any) -> str:
 
 
 # ---------------------------------------------------------
+# Redis Initialization
+# ---------------------------------------------------------
+def _init_audit_redis():
+    global _audit_redis, _PREVIOUS_HASH
+
+    if not AUDIT_REDIS_URL:
+        print(
+            _canonical({
+                "event_type": "audit.redis_not_configured",
+                "severity": "WARNING",
+                "ts_ms": int(time.time() * 1000)
+            }),
+            flush=True
+        )
+        return
+
+    try:
+        _audit_redis = redis.from_url(AUDIT_REDIS_URL, decode_responses=True)
+        stored_head = _audit_redis.get(AUDIT_HEAD_KEY)
+        if stored_head:
+            _PREVIOUS_HASH = stored_head
+    except Exception:
+        print(
+            _canonical({
+                "event_type": "audit.redis_connection_failed",
+                "severity": "CRITICAL",
+                "ts_ms": int(time.time() * 1000)
+            }),
+            flush=True
+        )
+
+
+_init_audit_redis()
+
+
+# ---------------------------------------------------------
 # SHA256 Helper
 # ---------------------------------------------------------
 def _sha256(value: str) -> str:
@@ -78,15 +103,6 @@ def emit_event(
     correlation_id: Optional[str] = None,
     env: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Emits a structured audit event and advances the hash chain.
-
-    Rules:
-    - No mutation after hashing
-    - event_hash = sha256(canonical(base_event) + previous_hash)
-    - previous_hash updated atomically
-    - Output is single-line JSON
-    """
 
     global _PREVIOUS_HASH
 
@@ -114,12 +130,23 @@ def emit_event(
     with _LOCK:
         prev_hash = _PREVIOUS_HASH
         event_hash = _sha256(_canonical(base_event) + prev_hash)
+
         _PREVIOUS_HASH = event_hash
 
-        try:
-            _AUDIT_REDIS.set("ztr:audit:head", event_hash)
-        except Exception:
-            pass  # Do not break runtime if audit persistence fails
+        if _audit_redis:
+            try:
+                _audit_redis.set(AUDIT_HEAD_KEY, event_hash)
+            except Exception:
+                _FALLBACK_BUFFER.append(event_hash)
+                print(
+                    _canonical({
+                        "event_type": "audit_chain_unavailable",
+                        "severity": "CRITICAL",
+                        "event_hash": event_hash,
+                        "ts_ms": int(time.time() * 1000)
+                    }),
+                    flush=True
+                )
 
     envelope = {
         **base_event,
@@ -127,7 +154,6 @@ def emit_event(
         "event_hash": event_hash,
     }
 
-    # Single-line structured log output
     print(_canonical(envelope), flush=True)
 
     return envelope
@@ -137,17 +163,10 @@ def emit_event(
 # Optional: Chain State Introspection (Debug Only)
 # ---------------------------------------------------------
 def get_current_chain_head() -> str:
-    """
-    Returns current head hash (useful for debugging / tests).
-    Not intended for runtime logic decisions.
-    """
     return _PREVIOUS_HASH
 
 
 def reset_chain(genesis: Optional[str] = None) -> None:
-    """
-    Resets chain head (ONLY for testing environments).
-    """
     global _PREVIOUS_HASH
     with _LOCK:
         _PREVIOUS_HASH = genesis or GENESIS_HASH
