@@ -29,10 +29,7 @@ SCHEMA_VERSION = "stc.audit.v1"
 DEFAULT_ENV = os.getenv("APP_ENV", "prod")
 GENESIS_HASH = os.getenv("AUDIT_CHAIN_GENESIS", "0" * 64)
 
-# Use SAME Redis contract as runtime
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
+REDIS_URL = os.environ["REDIS_URL"]
 
 # ---------------------------------------------------------
 # Redis keys
@@ -45,10 +42,8 @@ AUDIT_ENTRY_PREFIX = "ztr:audit:entry:"          # ztr:audit:entry:<event_hash>
 # ---------------------------------------------------------
 # Redis client
 # ---------------------------------------------------------
-_audit_redis = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
+_audit_redis = redis.from_url(
+    REDIS_URL,
     decode_responses=True,
 )
 
@@ -114,7 +109,7 @@ def emit_event(
                 envelope = dict(base_event)
                 envelope["prev_hash"] = prev_hash
 
-                # Deterministic hash (same style as your Phase 3 chain)
+                # Deterministic hash
                 event_hash = _sha256(_canonical(envelope) + prev_hash)
                 envelope["event_hash"] = event_hash
 
@@ -125,7 +120,6 @@ def emit_event(
                 pipe.set(AUDIT_ENTRY_PREFIX + event_hash, _canonical(envelope))
                 pipe.execute()
 
-                # keep stdout telemetry (still useful)
                 print(_canonical(envelope), flush=True)
 
                 return envelope
@@ -181,7 +175,6 @@ def verify_chain(limit: int = 5000) -> Dict[str, Any]:
                 "found_prev": entry.get("prev_hash"),
             }
 
-        # recompute
         candidate = dict(entry)
         candidate.pop("event_hash", None)
 

@@ -1,10 +1,11 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Header
 from pydantic import BaseModel, ConfigDict
 import redis
 import time
 import os
 import uuid
 import jwt
+import hashlib
 
 from audit_chain import emit_event, verify_chain, list_index, get_entry
 
@@ -31,6 +32,30 @@ r = redis.Redis(
     password=REDIS_PASSWORD,
     decode_responses=True
 )
+
+# ---------------------------------------------------------
+# Tenant API Key Enforcement (Phase 5)
+# ---------------------------------------------------------
+
+def sha256(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def derive_tenant_from_api_key(api_key: str) -> str:
+    hashed = sha256(api_key)
+    tenant_id = r.get(f"ztr:apikey:{hashed}")
+
+    if not tenant_id:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    return tenant_id
+
+
+def require_tenant_api_key(x_stc_api_key: str = Header(None)) -> str:
+    if not x_stc_api_key:
+        raise HTTPException(status_code=401, detail="Missing API key")
+
+    return derive_tenant_from_api_key(x_stc_api_key)
 
 # ---------------------------------------------------------
 # Models
@@ -64,6 +89,10 @@ class RevocationRequest(BaseModel):
     timestamp_ms: int
 
 
+class TenantRevokeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str
+
 # ---------------------------------------------------------
 # Health
 # ---------------------------------------------------------
@@ -71,7 +100,6 @@ class RevocationRequest(BaseModel):
 @app.get("/health")
 def health():
     return {"status": "ok"}
-
 
 # ---------------------------------------------------------
 # Phase 4 — Audit endpoints (read-only)
@@ -98,13 +126,15 @@ def audit_entry(event_hash: str):
         raise HTTPException(status_code=404, detail="audit_entry_not_found")
     return entry
 
-
 # ---------------------------------------------------------
 # /v1/tokens:issue
 # ---------------------------------------------------------
 
 @app.post("/v1/tokens:issue")
-def issue_token(req: TokenIssueRequest):
+def issue_token(
+    req: TokenIssueRequest,
+    tenant_id: str = Depends(require_tenant_api_key)
+):
 
     sid = f"SID-{uuid.uuid4().hex}"
     jti = uuid.uuid4().hex
@@ -122,12 +152,13 @@ def issue_token(req: TokenIssueRequest):
         "exp": exp,
         "ver": JWT_VERSION,
         "intent": req.intent,
-        "scopes": req.scopes
+        "scopes": req.scopes,
+        "tid": tenant_id
     }
 
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-    session_key = f"ztr:session:{sid}"
+    session_key = f"ztr:{tenant_id}:session:{sid}"
 
     r.set(
         session_key,
@@ -160,6 +191,7 @@ def issue_token(req: TokenIssueRequest):
             "issued_at": now,
             "expires_at": exp,
             "authority_store": "redis",
+            "tenant_id": tenant_id,
         },
     )
 
@@ -172,13 +204,15 @@ def issue_token(req: TokenIssueRequest):
         "audit": audit,
     }
 
-
 # ---------------------------------------------------------
 # /v1/introspect
 # ---------------------------------------------------------
 
 @app.post("/v1/introspect")
-def introspect(req: IntrospectionRequest):
+def introspect(
+    req: IntrospectionRequest,
+    tenant_id: str = Depends(require_tenant_api_key)
+):
 
     try:
         decoded = jwt.decode(
@@ -194,8 +228,11 @@ def introspect(req: IntrospectionRequest):
     if decoded.get("ver") != JWT_VERSION:
         raise HTTPException(status_code=401, detail="Invalid token version")
 
+    if decoded.get("tid") != tenant_id:
+        raise HTTPException(status_code=401, detail="Tenant mismatch")
+
     sid = decoded.get("sid")
-    session_key = f"ztr:session:{sid}"
+    session_key = f"ztr:{tenant_id}:session:{sid}"
 
     if not r.exists(session_key):
         audit = emit_event(
@@ -208,6 +245,7 @@ def introspect(req: IntrospectionRequest):
                 "result": "revoked",
                 "jwt_ver": decoded.get("ver"),
                 "redis_present": False,
+                "tenant_id": tenant_id,
             },
         )
         raise HTTPException(status_code=401, detail="Session revoked")
@@ -222,6 +260,7 @@ def introspect(req: IntrospectionRequest):
             "result": "active",
             "jwt_ver": decoded.get("ver"),
             "redis_present": True,
+            "tenant_id": tenant_id,
         },
     )
 
@@ -235,7 +274,6 @@ def introspect(req: IntrospectionRequest):
         "audit": audit,
     }
 
-
 # ---------------------------------------------------------
 # /v1/revocations/propagate
 # ---------------------------------------------------------
@@ -243,7 +281,11 @@ def introspect(req: IntrospectionRequest):
 @app.post("/v1/revocations/propagate")
 def propagate_revocation(req: RevocationRequest):
 
-    redis_key = f"ztr:session:{req.session_id}"
+    tenant_id = req.decision.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Missing tenant_id in decision")
+
+    redis_key = f"ztr:{tenant_id}:session:{req.session_id}"
     deleted = r.delete(redis_key)
 
     audit = emit_event(
@@ -258,6 +300,7 @@ def propagate_revocation(req: RevocationRequest):
             "redis_key": redis_key,
             "reason": req.decision.get("reason"),
             "confidence": req.decision.get("confidence"),
+            "tenant_id": tenant_id,
         },
     )
 
@@ -265,5 +308,37 @@ def propagate_revocation(req: RevocationRequest):
         "status": "ok",
         "deleted": bool(deleted),
         "redis_key": redis_key,
+        "audit": audit,
+    }
+
+# ---------------------------------------------------------
+# /v1/sessions/revoke  (Tenant-safe)
+# ---------------------------------------------------------
+
+@app.post("/v1/sessions/revoke")
+def tenant_revoke(
+    req: TenantRevokeRequest,
+    tenant_id: str = Depends(require_tenant_api_key)
+):
+
+    redis_key = f"ztr:{tenant_id}:session:{req.session_id}"
+    deleted = r.delete(redis_key)
+
+    audit = emit_event(
+        event_type="runtime.session_revoked",
+        service="ztr-runtime",
+        correlation_id=req.session_id,
+        payload={
+            "sid": req.session_id,
+            "deleted": bool(deleted),
+            "redis_key": redis_key,
+            "source": "tenant_api",
+            "tenant_id": tenant_id,
+        },
+    )
+
+    return {
+        "status": "ok",
+        "deleted": bool(deleted),
         "audit": audit,
     }
