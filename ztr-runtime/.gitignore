@@ -1,0 +1,12 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+
+# Local Redis config
+ztr-redis-config/
+
+# OS noise
+.DS_Store
