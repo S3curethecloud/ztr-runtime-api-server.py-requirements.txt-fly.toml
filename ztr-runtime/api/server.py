@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 import redis
 import time
@@ -10,6 +11,14 @@ import hashlib
 from audit_chain import emit_event, verify_chain, list_index, get_entry
 
 app = FastAPI(title="Zero Trust Runtime")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8080"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ---------------------------------------------------------
 # Configuration
@@ -57,13 +66,24 @@ def require_tenant_api_key(x_stc_api_key: str = Header(None)) -> str:
 
     return derive_tenant_from_api_key(x_stc_api_key)
 
+
+# ---------------------------------------------------------
+# Additional Helper (Active Session Listing)
+# ---------------------------------------------------------
+
+def resolve_tenant_from_api_key(api_key: str):
+    hashed = hashlib.sha256(api_key.encode()).hexdigest()
+    tenant = r.get(f"ztr:apikey:{hashed}")
+    if not tenant:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    return tenant
+
 # ---------------------------------------------------------
 # Models
 # ---------------------------------------------------------
 
 class TokenIssueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     principal: str
     intent: str
     scopes: list[str]
@@ -73,13 +93,11 @@ class TokenIssueRequest(BaseModel):
 
 class IntrospectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     token: str
 
 
 class RevocationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
     source: str
     event_type: str
     incident_id: str
@@ -341,4 +359,42 @@ def tenant_revoke(
         "status": "ok",
         "deleted": bool(deleted),
         "audit": audit,
+    }
+
+# ---------------------------------------------------------
+# /v1/sessions/active
+# ---------------------------------------------------------
+
+@app.get("/v1/sessions/active")
+def list_active_sessions(x_stc_api_key: str = Header(...)):
+
+    tenant_id = resolve_tenant_from_api_key(x_stc_api_key)
+
+    sessions = []
+    now = int(time.time())
+
+    for key in r.scan_iter(f"ztr:{tenant_id}:session:*"):
+        data_raw = r.get(key)
+        if not data_raw:
+            continue
+
+        data = eval(data_raw)
+
+        ttl_remaining = r.ttl(key)
+        sid = key.split(":")[-1]
+
+        sessions.append({
+            "sid": sid,
+            "principal": data.get("principal"),
+            "intent": data.get("intent"),
+            "scopes": data.get("scopes"),
+            "issued_at": data.get("issued_at"),
+            "expires_at": data.get("expires_at"),
+            "ttl_remaining": ttl_remaining
+        })
+
+    return {
+        "tenant_id": tenant_id,
+        "active_sessions": sessions,
+        "count": len(sessions)
     }
