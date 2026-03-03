@@ -1,3 +1,5 @@
+# FILE: api/server.py
+
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
@@ -7,6 +9,7 @@ import os
 import uuid
 import jwt
 import hashlib
+import json
 
 from audit_chain import emit_event, verify_chain, list_index, get_entry
 
@@ -65,18 +68,6 @@ def require_tenant_api_key(x_stc_api_key: str = Header(None)) -> str:
         raise HTTPException(status_code=401, detail="Missing API key")
 
     return derive_tenant_from_api_key(x_stc_api_key)
-
-
-# ---------------------------------------------------------
-# Additional Helper (Active Session Listing)
-# ---------------------------------------------------------
-
-def resolve_tenant_from_api_key(api_key: str):
-    hashed = hashlib.sha256(api_key.encode()).hexdigest()
-    tenant = r.get(f"ztr:apikey:{hashed}")
-    if not tenant:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    return tenant
 
 # ---------------------------------------------------------
 # Models
@@ -180,7 +171,7 @@ def issue_token(
 
     r.set(
         session_key,
-        str({
+        json.dumps({
             "principal": req.principal,
             "intent": req.intent,
             "scopes": req.scopes,
@@ -366,9 +357,7 @@ def tenant_revoke(
 # ---------------------------------------------------------
 
 @app.get("/v1/sessions/active")
-def list_active_sessions(x_stc_api_key: str = Header(...)):
-
-    tenant_id = resolve_tenant_from_api_key(x_stc_api_key)
+def list_active_sessions(tenant_id: str = Depends(require_tenant_api_key)):
 
     sessions = []
     now = int(time.time())
@@ -378,7 +367,7 @@ def list_active_sessions(x_stc_api_key: str = Header(...)):
         if not data_raw:
             continue
 
-        data = eval(data_raw)
+        data = json.loads(data_raw)
 
         ttl_remaining = r.ttl(key)
         sid = key.split(":")[-1]
