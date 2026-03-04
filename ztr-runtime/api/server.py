@@ -17,15 +17,19 @@ app = FastAPI(title="Zero Trust Runtime")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080"],
+    allow_origins=[
+        "http://localhost:8080",
+        "https://securethecloud.dev",
+    ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-STC-API-Key", "Authorization"],
 )
 
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
+
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
@@ -162,7 +166,8 @@ def issue_token(
         "ver": JWT_VERSION,
         "intent": req.intent,
         "scopes": req.scopes,
-        "tid": tenant_id
+        "tid": tenant_id,
+        "policy_revision": POLICY_REVISION,
     }
 
     token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
@@ -178,7 +183,8 @@ def issue_token(
             "context": req.context,
             "issued_at": now,
             "expires_at": exp,
-            "jti": jti
+            "jti": jti,
+            "policy_revision": POLICY_REVISION,
         }),
         ex=req.ttl_seconds
     )
@@ -240,6 +246,25 @@ def introspect(
     if decoded.get("tid") != tenant_id:
         raise HTTPException(status_code=401, detail="Tenant mismatch")
 
+    token_rev = decoded.get("policy_revision")
+    if token_rev != POLICY_REVISION:
+        audit = emit_event(
+            event_type="runtime.token_introspected",
+            service="ztr-runtime",
+            correlation_id=decoded.get("sid"),
+            payload={
+                "sid": decoded.get("sid"),
+                "principal": decoded.get("sub"),
+                "result": "policy_mismatch",
+                "jwt_ver": decoded.get("ver"),
+                "redis_present": None,
+                "tenant_id": tenant_id,
+                "token_policy_revision": token_rev,
+                "runtime_policy_revision": POLICY_REVISION,
+            },
+        )
+        raise HTTPException(status_code=401, detail="policy_revision_mismatch")
+
     sid = decoded.get("sid")
     session_key = f"ztr:{tenant_id}:session:{sid}"
 
@@ -280,6 +305,7 @@ def introspect(
         "scopes": decoded.get("scopes"),
         "intent": decoded.get("intent"),
         "expires_at": decoded.get("exp"),
+        "policy_revision": decoded.get("policy_revision"),
         "audit": audit,
     }
 
@@ -321,7 +347,7 @@ def propagate_revocation(req: RevocationRequest):
     }
 
 # ---------------------------------------------------------
-# /v1/sessions/revoke  (Tenant-safe)
+# /v1/sessions/revoke
 # ---------------------------------------------------------
 
 @app.post("/v1/sessions/revoke")
@@ -360,10 +386,10 @@ def tenant_revoke(
 def list_active_sessions(tenant_id: str = Depends(require_tenant_api_key)):
 
     sessions = []
-    now = int(time.time())
 
     for key in r.scan_iter(f"ztr:{tenant_id}:session:*"):
         data_raw = r.get(key)
+
         if not data_raw:
             continue
 
