@@ -1,12 +1,19 @@
 # =========================================================
-# SecureTheCloud — Deterministic Audit Chain (Phase 4)
+# SecureTheCloud — Deterministic Audit Chain
 # Schema: stc.audit.v1
 # GOVERNANCE: MGF — AUTHORITY-ALL
 #
-# Upgrade (Phase 4):
-#   - Store every event entry in Redis (replayable)
-#   - Maintain indexes for retrieval
-#   - Maintain hash-chain head (tamper-evident)
+# Phase 4: Hash-chained ledger (FROZEN — do not touch)
+# Phase 5: Tenant-scoped namespaces (5A-01)
+#
+# DELTA from Phase 4:
+#   - Removed global AUDIT_HEAD_KEY / AUDIT_INDEX_ALL /
+#     AUDIT_INDEX_PREFIX / AUDIT_ENTRY_PREFIX constants
+#   - Added _keys(tenant_id) helper
+#   - Added tenant_id param to: emit_event, get_entry,
+#     list_index, verify_chain
+#   - Zero changes to hashing logic, WatchError loop,
+#     _canonical, _sha256 — all frozen
 # =========================================================
 
 from __future__ import annotations
@@ -23,33 +30,37 @@ import redis
 from redis.exceptions import WatchError
 
 # ---------------------------------------------------------
-# Configuration
+# Configuration (frozen)
 # ---------------------------------------------------------
 SCHEMA_VERSION = "stc.audit.v1"
-DEFAULT_ENV = os.getenv("APP_ENV", "prod")
-GENESIS_HASH = os.getenv("AUDIT_CHAIN_GENESIS", "0" * 64)
-
-REDIS_URL = os.environ["REDIS_URL"]
-
-# ---------------------------------------------------------
-# Redis keys
-# ---------------------------------------------------------
-AUDIT_HEAD_KEY = "ztr:audit:head"
-AUDIT_INDEX_ALL = "ztr:audit:index:all"
-AUDIT_INDEX_PREFIX = "ztr:audit:index:"          # ztr:audit:index:<event_type>
-AUDIT_ENTRY_PREFIX = "ztr:audit:entry:"          # ztr:audit:entry:<event_hash>
+DEFAULT_ENV    = os.getenv("APP_ENV", "prod")
+GENESIS_HASH   = os.getenv("AUDIT_CHAIN_GENESIS", "0" * 64)
+REDIS_URL      = os.environ["REDIS_URL"]
 
 # ---------------------------------------------------------
-# Redis client
+# Redis client (frozen)
 # ---------------------------------------------------------
-_audit_redis = redis.from_url(
-    REDIS_URL,
-    decode_responses=True,
-)
-
+_audit_redis = redis.from_url(REDIS_URL, decode_responses=True)
 _LOCK = threading.Lock()
 
 
+# ---------------------------------------------------------
+# Phase 5A-01 — tenant-scoped key builder
+# Replaces the four global key constants from Phase 4.
+# ---------------------------------------------------------
+def _keys(tenant_id: str) -> dict:
+    """Return all Redis key strings scoped to this tenant."""
+    return {
+        "head":         f"ztr:{tenant_id}:audit:head",
+        "index_all":    f"ztr:{tenant_id}:audit:index:all",
+        "index_prefix": f"ztr:{tenant_id}:audit:index:",
+        "entry_prefix": f"ztr:{tenant_id}:audit:entry:",
+    }
+
+
+# ---------------------------------------------------------
+# Hashing helpers (frozen — Phase 4)
+# ---------------------------------------------------------
 def _canonical(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -58,21 +69,22 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+# ---------------------------------------------------------
+# emit_event — Phase 5A-01: added tenant_id param
+# Everything else frozen (WatchError loop, envelope shape,
+# hash computation order).
+# ---------------------------------------------------------
 def emit_event(
     *,
     event_type: str,
     service: str,
     payload: Dict[str, Any],
+    tenant_id: str,
     correlation_id: Optional[str] = None,
     env: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Append an audit event using a tamper-evident hash chain.
-    Stores:
-      - head hash
-      - entry record (by hash)
-      - indexes (all + per event_type)
-    Returns the full envelope (incl hashes).
+    Append an audit event to the tenant-scoped tamper-evident hash chain.
     """
 
     if not event_type:
@@ -81,47 +93,44 @@ def emit_event(
         raise ValueError("service required")
     if not isinstance(payload, dict):
         raise ValueError("payload must be dict")
+    if not tenant_id:
+        raise ValueError("tenant_id required")
 
     env = env or DEFAULT_ENV
+    k   = _keys(tenant_id)
 
     base_event = {
-        "schema": SCHEMA_VERSION,
-        "event_id": str(uuid.uuid4()),
-        "event_type": event_type,
-        "ts_ms": int(time.time() * 1000),
-        "service": service,
-        "env": env,
+        "schema":         SCHEMA_VERSION,
+        "event_id":       str(uuid.uuid4()),
+        "event_type":     event_type,
+        "ts_ms":          int(time.time() * 1000),
+        "service":        service,
+        "env":            env,
         "correlation_id": correlation_id,
-        "payload": payload,
+        "payload":        payload,
     }
 
-    # -----------------------------------------------------
-    # Multi-machine safe: WATCH head, compute, commit
-    # -----------------------------------------------------
     for _ in range(5):
         try:
             with _audit_redis.pipeline() as pipe:
-                pipe.watch(AUDIT_HEAD_KEY)
+                pipe.watch(k["head"])
 
-                prev_hash = pipe.get(AUDIT_HEAD_KEY) or GENESIS_HASH
+                prev_hash = pipe.get(k["head"]) or GENESIS_HASH
 
-                # IMPORTANT: keep deterministic ordering
-                envelope = dict(base_event)
+                envelope              = dict(base_event)
                 envelope["prev_hash"] = prev_hash
 
-                # Deterministic hash
-                event_hash = _sha256(_canonical(envelope) + prev_hash)
+                event_hash             = _sha256(_canonical(envelope) + prev_hash)
                 envelope["event_hash"] = event_hash
 
                 pipe.multi()
-                pipe.set(AUDIT_HEAD_KEY, event_hash)
-                pipe.rpush(AUDIT_INDEX_ALL, event_hash)
-                pipe.rpush(AUDIT_INDEX_PREFIX + event_type, event_hash)
-                pipe.set(AUDIT_ENTRY_PREFIX + event_hash, _canonical(envelope))
+                pipe.set(k["head"], event_hash)
+                pipe.rpush(k["index_all"], event_hash)
+                pipe.rpush(k["index_prefix"] + event_type, event_hash)
+                pipe.set(k["entry_prefix"] + event_hash, _canonical(envelope))
                 pipe.execute()
 
                 print(_canonical(envelope), flush=True)
-
                 return envelope
 
         except WatchError:
@@ -130,41 +139,80 @@ def emit_event(
     raise RuntimeError("audit_chain_append_failed")
 
 
-def get_entry(event_hash: str) -> Optional[Dict[str, Any]]:
-    raw = _audit_redis.get(AUDIT_ENTRY_PREFIX + event_hash)
+# ---------------------------------------------------------
+# get_entry — Phase 5A-01: added tenant_id param
+# ---------------------------------------------------------
+def get_entry(
+    event_hash: str,
+    tenant_id: str,
+) -> Optional[Dict[str, Any]]:
+
+    k   = _keys(tenant_id)
+    raw = _audit_redis.get(k["entry_prefix"] + event_hash)
+
     if not raw:
         return None
+
     return json.loads(raw)
 
 
-def list_index(event_type: str = "all", limit: int = 50) -> list[str]:
+# ---------------------------------------------------------
+# list_index — Phase 5A-01: added tenant_id param
+# ---------------------------------------------------------
+def list_index(
+    tenant_id: str,
+    event_type: str = "all",
+    limit: int = 50,
+) -> list[str]:
+
+    k = _keys(tenant_id)
+
     if event_type == "all":
-        key = AUDIT_INDEX_ALL
+        key = k["index_all"]
     else:
-        key = AUDIT_INDEX_PREFIX + event_type
+        key = k["index_prefix"] + event_type
 
     total = _audit_redis.llen(key)
+
     if total <= 0:
         return []
 
-    start = max(0, total - limit)
+    start  = max(0, total - limit)
     hashes = _audit_redis.lrange(key, start, -1)
+
     return list(reversed(hashes))
 
 
-def verify_chain(limit: int = 5000) -> Dict[str, Any]:
-    total = _audit_redis.llen(AUDIT_INDEX_ALL)
+# ---------------------------------------------------------
+# verify_chain — Phase 5A-01: added tenant_id param
+# Hash verification logic frozen (Phase 4).
+# ---------------------------------------------------------
+def verify_chain(
+    tenant_id: str,
+    limit: int = 5000,
+) -> Dict[str, Any]:
+
+    k     = _keys(tenant_id)
+    total = _audit_redis.llen(k["index_all"])
+
     if total == 0:
         return {"status": "valid", "events_verified": 0, "reason": "empty"}
 
-    start = max(0, total - limit)
-    hashes = _audit_redis.lrange(AUDIT_INDEX_ALL, start, -1)
+    start  = max(0, total - limit)
+    hashes = _audit_redis.lrange(k["index_all"], start, -1)
 
     prev_hash = GENESIS_HASH
+
     for h in hashes:
-        entry = get_entry(h)
+
+        entry = get_entry(h, tenant_id=tenant_id)
+
         if not entry:
-            return {"status": "broken", "reason": "missing_entry", "event_hash": h}
+            return {
+                "status": "broken",
+                "reason": "missing_entry",
+                "event_hash": h,
+            }
 
         if entry.get("prev_hash") != prev_hash:
             return {
@@ -179,6 +227,7 @@ def verify_chain(limit: int = 5000) -> Dict[str, Any]:
         candidate.pop("event_hash", None)
 
         recalculated = _sha256(_canonical(candidate) + prev_hash)
+
         if recalculated != entry.get("event_hash"):
             return {
                 "status": "broken",
@@ -190,4 +239,8 @@ def verify_chain(limit: int = 5000) -> Dict[str, Any]:
 
         prev_hash = entry["event_hash"]
 
-    return {"status": "valid", "events_verified": len(hashes), "chain_head": prev_hash}
+    return {
+        "status": "valid",
+        "events_verified": len(hashes),
+        "chain_head": prev_hash,
+    }
