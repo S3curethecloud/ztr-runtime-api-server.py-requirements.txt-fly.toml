@@ -4,9 +4,12 @@ primary_region = "lax"
 [build]
   dockerfile = "Dockerfile"
 
+[env]
+  POLICY_REVISION = "dev-1"
+  JWT_SECRET_VERSION = "v1"
+
 [http_service]
   internal_port = 8000
   force_https = true
   auto_start_machines = true
-  auto_stop_machines = false
   min_machines_running = 1
