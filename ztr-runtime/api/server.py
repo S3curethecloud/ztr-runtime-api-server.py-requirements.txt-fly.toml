@@ -18,10 +18,9 @@
 #   5B-03: policy_revision + opa_result in introspect audit
 # =========================================================
 
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict
 import redis
 import time
 import os
@@ -30,13 +29,33 @@ import jwt
 import hashlib
 import json
 
+from api.models import TokenIssueRequest, IntrospectionRequest, TenantRevokeRequest
+from api.auth import require_tenant_api_key
+
 from audit_chain import emit_event, verify_chain, list_index, get_entry
 from opa_bridge import evaluate_introspect_policy
+
 from admin import admin_router
+from api.tokens import tokens_router
+from api.sessions import sessions_router
+# from audit import audit_router
+# from revocations import revocations_router
 
 app = FastAPI(title="Zero Trust Runtime")
 
+# ---------------------------------------------------------
+# ROUTER REGISTRATION
+# ---------------------------------------------------------
+
 app.include_router(admin_router)
+app.include_router(tokens_router)
+app.include_router(sessions_router)
+# app.include_router(audit_router)
+# app.include_router(revocations_router)
+
+# ---------------------------------------------------------
+# CORS
+# ---------------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
@@ -72,32 +91,7 @@ r = redis.Redis(
 def sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
-def derive_tenant_from_api_key(api_key: str) -> str:
-    hashed    = sha256(api_key)
-    tenant_id = r.get(f"ztr:apikey:{hashed}")
-    if not tenant_id:
-        raise HTTPException(status_code=401, detail="Invalid API key")
-    return tenant_id
-
-def require_tenant_api_key(x_stc_api_key: str = Header(None)) -> str:
-    if not x_stc_api_key:
-        raise HTTPException(status_code=401, detail="Missing API key")
-    return derive_tenant_from_api_key(x_stc_api_key)
-
-class TokenIssueRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    principal:   str
-    intent:      str
-    scopes:      list[str]
-    ttl_seconds: int
-    context:     dict
-
-class IntrospectionRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    token: str
-
-class RevocationRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class RevocationRequest(TokenIssueRequest.__class__):
     source:        str
     event_type:    str
     incident_id:   str
@@ -105,10 +99,6 @@ class RevocationRequest(BaseModel):
     decision:      dict
     decision_hash: str
     timestamp_ms:  int
-
-class TenantRevokeRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    session_id: str
 
 @app.get("/health")
 def health():
