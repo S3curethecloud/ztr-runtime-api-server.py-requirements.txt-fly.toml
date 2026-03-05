@@ -20,6 +20,7 @@
 
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict
 import redis
 import time
@@ -35,12 +36,8 @@ from admin import admin_router
 
 app = FastAPI(title="Zero Trust Runtime")
 
-# Phase 5A-05 — mount admin router
 app.include_router(admin_router)
 
-# ---------------------------------------------------------
-# Phase 5A-06 — CORS: production origins only
-# ---------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -54,9 +51,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------
-# Configuration (frozen)
-# ---------------------------------------------------------
 REDIS_HOST     = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT     = int(os.getenv("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
@@ -75,13 +69,8 @@ r = redis.Redis(
     decode_responses=True,
 )
 
-# ---------------------------------------------------------
-# Tenant API Key Enforcement (frozen — Phase 5 scaffold)
-# ---------------------------------------------------------
-
 def sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
-
 
 def derive_tenant_from_api_key(api_key: str) -> str:
     hashed    = sha256(api_key)
@@ -90,15 +79,10 @@ def derive_tenant_from_api_key(api_key: str) -> str:
         raise HTTPException(status_code=401, detail="Invalid API key")
     return tenant_id
 
-
 def require_tenant_api_key(x_stc_api_key: str = Header(None)) -> str:
     if not x_stc_api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
     return derive_tenant_from_api_key(x_stc_api_key)
-
-# ---------------------------------------------------------
-# Models (frozen)
-# ---------------------------------------------------------
 
 class TokenIssueRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -108,11 +92,9 @@ class TokenIssueRequest(BaseModel):
     ttl_seconds: int
     context:     dict
 
-
 class IntrospectionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     token: str
-
 
 class RevocationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -124,14 +106,9 @@ class RevocationRequest(BaseModel):
     decision_hash: str
     timestamp_ms:  int
 
-
 class TenantRevokeRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     session_id: str
-
-# ---------------------------------------------------------
-# Phase 5A-07 — /health enriched
-# ---------------------------------------------------------
 
 @app.get("/health")
 def health():
@@ -145,17 +122,12 @@ def health():
         "policy_rev":      POLICY_REVISION,
     }
 
-# ---------------------------------------------------------
-# Phase 5A-04 — Audit endpoints locked behind API key
-# ---------------------------------------------------------
-
 @app.get("/v1/audit/verify")
 def audit_verify(
     limit: int = 5000,
     tenant_id: str = Depends(require_tenant_api_key),
 ):
     return verify_chain(tenant_id=tenant_id, limit=limit)
-
 
 @app.get("/v1/audit/index/{event_type}")
 def audit_index(
@@ -169,7 +141,6 @@ def audit_index(
         "hashes":     list_index(tenant_id=tenant_id, event_type=event_type, limit=limit),
     }
 
-
 @app.get("/v1/audit/entry/{event_hash}")
 def audit_entry(
     event_hash: str,
@@ -181,284 +152,143 @@ def audit_entry(
     return entry
 
 # ---------------------------------------------------------
-# /v1/tokens:issue (frozen — Phase 3)
+# SAFE READ-ONLY DECISION STREAM
 # ---------------------------------------------------------
 
-@app.post("/v1/tokens:issue")
-def issue_token(
-    req: TokenIssueRequest,
-    tenant_id: str = Depends(require_tenant_api_key),
-):
-    sid = f"SID-{uuid.uuid4().hex}"
-    jti = uuid.uuid4().hex
-
-    now = int(time.time())
-    exp = now + req.ttl_seconds
-
-    payload = {
-        "iss":    JWT_ISSUER,
-        "aud":    JWT_AUDIENCE,
-        "sub":    req.principal,
-        "sid":    sid,
-        "jti":    jti,
-        "iat":    now,
-        "exp":    exp,
-        "ver":    JWT_VERSION,
-        "intent": req.intent,
-        "scopes": req.scopes,
-        "tid":    tenant_id,
-    }
-
-    token = jwt.encode(payload, JWT_SECRET, algorithm="HS256")
-
-    session_key = f"ztr:{tenant_id}:session:{sid}"
-
-    r.set(
-        session_key,
-        json.dumps({
-            "principal": req.principal,
-            "intent":    req.intent,
-            "scopes":    req.scopes,
-            "context":   req.context,
-            "issued_at": now,
-            "expires_at": exp,
-            "jti":       jti,
-        }),
-        ex=req.ttl_seconds,
-    )
-
-    audit = emit_event(
-        event_type="runtime.token_issued",
-        service="ztr-runtime",
-        correlation_id=sid,
-        tenant_id=tenant_id,
-        payload={
-            "sid":             sid,
-            "jti":             jti,
-            "principal":       req.principal,
-            "intent":          req.intent,
-            "scopes":          req.scopes,
-            "ttl_seconds":     req.ttl_seconds,
-            "jwt_ver":         JWT_VERSION,
-            "policy_revision": POLICY_REVISION,
-            "secret_version":  JWT_SECRET_VERSION,
-            "issued_at":       now,
-            "expires_at":      exp,
-            "authority_store": "redis",
-            "tenant_id":       tenant_id,
-        },
-    )
-
-    return {
-        "access_token": token,
-        "token_type":   "Bearer",
-        "expires_in":   req.ttl_seconds,
-        "session_id":   sid,
-        "jti":          jti,
-        "audit":        audit,
-    }
-
-# ---------------------------------------------------------
-# /v1/introspect
-# ---------------------------------------------------------
-
-@app.post("/v1/introspect")
-def introspect(
-    req: IntrospectionRequest,
+@app.get("/v1/decisions")
+def list_recent_decisions(
+    limit: int = 25,
     tenant_id: str = Depends(require_tenant_api_key),
 ):
 
-    try:
-        decoded = jwt.decode(
-            req.token,
-            JWT_SECRET,
-            algorithms=["HS256"],
-            issuer=JWT_ISSUER,
-            audience=JWT_AUDIENCE,
-        )
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    decision_event_types = [
+        "runtime.token_introspected",
+        "runtime.policy_denied",
+        "runtime.session_revoked",
+    ]
 
-    if decoded.get("ver") != JWT_VERSION:
-        raise HTTPException(status_code=401, detail="Invalid token version")
+    events = []
 
-    if decoded.get("tid") != tenant_id:
-        raise HTTPException(status_code=401, detail="Tenant mismatch")
+    for event_type in decision_event_types:
 
-    sid         = decoded.get("sid")
-    session_key = f"ztr:{tenant_id}:session:{sid}"
-
-    if not r.exists(session_key):
-        emit_event(
-            event_type="runtime.token_introspected",
-            service="ztr-runtime",
-            correlation_id=sid,
+        hashes = list_index(
             tenant_id=tenant_id,
-            payload={
-                "sid":       sid,
-                "principal": decoded.get("sub"),
-                "result":    "revoked",
-                "jwt_ver":   decoded.get("ver"),
-                "redis_present": False,
-                "tenant_id": tenant_id,
-            },
+            event_type=event_type,
+            limit=limit,
         )
-        raise HTTPException(status_code=401, detail="Session revoked")
 
-    session_data = json.loads(r.get(session_key) or "{}")
+        for h in hashes:
 
-    opa_result = evaluate_introspect_policy(
-        principal=decoded.get("sub"),
-        scopes=decoded.get("scopes", []),
-        intent=decoded.get("intent"),
-        tenant_id=tenant_id,
-        policy_revision=POLICY_REVISION,
-        context=session_data.get("context", {}),
-    )
+            entry = get_entry(h, tenant_id=tenant_id)
+            if not entry:
+                continue
 
-    if not opa_result["allow"]:
-        emit_event(
-            event_type="runtime.policy_denied",
-            service="ztr-runtime",
-            correlation_id=sid,
-            tenant_id=tenant_id,
-            payload={
-                "sid":             sid,
-                "principal":       decoded.get("sub"),
-                "reason":          opa_result["reason"],
-                "policy_revision": opa_result["policy_revision"],
-                "tenant_id":       tenant_id,
-            },
-        )
-        raise HTTPException(status_code=401, detail="policy_denied")
+            payload = entry.get("payload", {})
 
-    audit = emit_event(
-        event_type="runtime.token_introspected",
-        service="ztr-runtime",
-        correlation_id=sid,
-        tenant_id=tenant_id,
-        payload={
-            "sid":             sid,
-            "principal":       decoded.get("sub"),
-            "result":          "active",
-            "jwt_ver":         decoded.get("ver"),
-            "redis_present":   True,
-            "tenant_id":       tenant_id,
-            "policy_revision": POLICY_REVISION,
-            "opa_result":      opa_result.get("reason"),
-        },
-    )
+            events.append({
+                "id": entry.get("event_hash"),
+                "type": entry.get("event_type"),
+                "time": entry.get("ts_ms"),
+                "principal": payload.get("principal"),
+                "intent": payload.get("intent"),
+                "result": payload.get("result"),
+                "policy_revision": payload.get("policy_revision"),
+            })
 
-    return {
-        "status":     "active",
-        "session_id": sid,
-        "principal":  decoded.get("sub"),
-        "scopes":     decoded.get("scopes"),
-        "intent":     decoded.get("intent"),
-        "expires_at": decoded.get("exp"),
-        "audit":      audit,
-    }
+    events.sort(key=lambda e: e["time"], reverse=True)
+
+    return {"events": events[:limit]}
 
 # ---------------------------------------------------------
-# /v1/revocations/propagate
+# DECISION EXPLANATION ENDPOINT
 # ---------------------------------------------------------
 
-@app.post("/v1/revocations/propagate")
-def propagate_revocation(
-    req: RevocationRequest,
+@app.get("/v1/decisions/{event_hash}")
+def explain_decision(
+    event_hash: str,
     tenant_id: str = Depends(require_tenant_api_key),
 ):
 
-    redis_key = f"ztr:{tenant_id}:session:{req.session_id}"
-    deleted   = r.delete(redis_key)
+    entry = get_entry(event_hash=event_hash, tenant_id=tenant_id)
 
-    audit = emit_event(
-        event_type="runtime.session_revoked",
-        service="ztr-runtime",
-        correlation_id=req.session_id,
-        tenant_id=tenant_id,
-        payload={
-            "sid":          req.session_id,
-            "incident_id":  req.incident_id,
-            "decision_hash": req.decision_hash,
-            "deleted":      bool(deleted),
-            "redis_key":    redis_key,
-            "reason":       req.decision.get("reason"),
-            "confidence":   req.decision.get("confidence"),
-            "tenant_id":    tenant_id,
-        },
-    )
+    if not entry:
+        raise HTTPException(status_code=404, detail="decision_not_found")
+
+    payload = entry.get("payload", {})
 
     return {
-        "status":    "ok",
-        "deleted":   bool(deleted),
-        "redis_key": redis_key,
-        "audit":     audit,
+        "event_hash": entry.get("event_hash"),
+        "event_type": entry.get("event_type"),
+        "timestamp": entry.get("ts_ms"),
+        "principal": payload.get("principal"),
+        "intent": payload.get("intent"),
+        "result": payload.get("result"),
+        "policy_revision": payload.get("policy_revision"),
+        "reason": payload.get("reason") or payload.get("opa_result"),
+        "correlation_id": entry.get("correlation_id"),
     }
 
 # ---------------------------------------------------------
-# /v1/sessions/revoke
+# SSE DECISION STREAM
 # ---------------------------------------------------------
 
-@app.post("/v1/sessions/revoke")
-def tenant_revoke(
-    req: TenantRevokeRequest,
+@app.get("/v1/decisions/stream")
+def stream_decisions(
     tenant_id: str = Depends(require_tenant_api_key),
 ):
 
-    redis_key = f"ztr:{tenant_id}:session:{req.session_id}"
-    deleted   = r.delete(redis_key)
+    decision_event_types = [
+        "runtime.token_introspected",
+        "runtime.policy_denied",
+        "runtime.session_revoked",
+    ]
 
-    audit = emit_event(
-        event_type="runtime.session_revoked",
-        service="ztr-runtime",
-        correlation_id=req.session_id,
-        tenant_id=tenant_id,
-        payload={
-            "sid":       req.session_id,
-            "deleted":   bool(deleted),
-            "redis_key": redis_key,
-            "source":    "tenant_api",
-            "tenant_id": tenant_id,
-        },
+    def event_stream():
+
+        last_seen = set()
+
+        while True:
+
+            events = []
+
+            for event_type in decision_event_types:
+
+                hashes = list_index(
+                    tenant_id=tenant_id,
+                    event_type=event_type,
+                    limit=20,
+                )
+
+                for h in hashes:
+
+                    if h in last_seen:
+                        continue
+
+                    entry = get_entry(h, tenant_id=tenant_id)
+                    if not entry:
+                        continue
+
+                    payload = entry.get("payload", {})
+
+                    event = {
+                        "id": entry.get("event_hash"),
+                        "type": entry.get("event_type"),
+                        "time": entry.get("ts_ms"),
+                        "principal": payload.get("principal"),
+                        "intent": payload.get("intent"),
+                        "result": payload.get("result"),
+                        "policy_revision": payload.get("policy_revision"),
+                    }
+
+                    last_seen.add(h)
+                    events.append(event)
+
+            for e in events:
+                yield f"data: {json.dumps(e)}\n\n"
+
+            time.sleep(2)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
     )
-
-    return {
-        "status":  "ok",
-        "deleted": bool(deleted),
-        "audit":   audit,
-    }
-
-# ---------------------------------------------------------
-# /v1/sessions/active
-# ---------------------------------------------------------
-
-@app.get("/v1/sessions/active")
-def list_active_sessions(tenant_id: str = Depends(require_tenant_api_key)):
-
-    sessions = []
-
-    for key in r.scan_iter(f"ztr:{tenant_id}:session:*"):
-        data_raw = r.get(key)
-        if not data_raw:
-            continue
-
-        data          = json.loads(data_raw)
-        ttl_remaining = r.ttl(key)
-        sid           = key.split(":")[-1]
-
-        sessions.append({
-            "sid":           sid,
-            "principal":     data.get("principal"),
-            "intent":        data.get("intent"),
-            "scopes":        data.get("scopes"),
-            "issued_at":     data.get("issued_at"),
-            "expires_at":    data.get("expires_at"),
-            "ttl_remaining": ttl_remaining,
-        })
-
-    return {
-        "tenant_id":       tenant_id,
-        "active_sessions": sessions,
-        "count":           len(sessions),
-    }

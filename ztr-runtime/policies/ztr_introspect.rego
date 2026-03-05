@@ -2,7 +2,7 @@ package ztr.introspect
 
 default allow = false
 
-allow {
+allow if {
     count(input.principal) > 0
     count(input.scopes) > 0
     count(input.tenant_id) > 0
