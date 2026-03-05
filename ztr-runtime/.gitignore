@@ -10,3 +10,9 @@ ztr-redis-config/
 
 # OS noise
 .DS_Store
+
+# Environment variables
+.env
+
+# Logs
+*.log

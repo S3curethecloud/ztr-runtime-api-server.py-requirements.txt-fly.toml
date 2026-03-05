@@ -105,3 +105,47 @@ def evaluate_introspect_policy(
         "reason":          "opa_allow" if allowed else "opa_deny",
         "policy_revision": policy_revision,
     }
+
+
+def evaluate_issue_policy(input_payload: dict) -> dict:
+    """
+    Evaluate token issuance policy through OPA.
+
+    Fail-closed rules:
+      OPA allow=true   → allow issuance
+      OPA allow=false  → deny issuance
+      OPA unavailable  → deny issuance
+      Any exception    → deny issuance
+
+    This function MUST NOT raise.
+    """
+
+    url = OPA_URL.rstrip("/") + "/v1/data/ztr/issue/allow"
+
+    try:
+        resp = httpx.post(
+            url,
+            json={"input": input_payload},
+            timeout=OPA_TIMEOUT_S,
+        )
+        resp.raise_for_status()
+        body = resp.json()
+
+    except Exception:
+        return {
+            "allow": False,
+            "reason": "opa_unavailable",
+        }
+
+    if not isinstance(body, dict) or "result" not in body:
+        return {
+            "allow": False,
+            "reason": "opa_bad_response",
+        }
+
+    allowed = bool(body["result"])
+
+    return {
+        "allow": allowed,
+        "reason": "opa_allow" if allowed else "opa_deny",
+    }
