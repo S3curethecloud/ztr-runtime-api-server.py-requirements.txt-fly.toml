@@ -1,85 +1,60 @@
-# SecureTheCloud — Token Issuance Policy
-# Phase 5B-02
-#
-# Evaluated by:
-#   POST /v1/data/ztr/issue/allow
-#
-# Input schema expected from runtime:
-#
-# {
-#   "principal": "user_id",
-#   "intent": "refund:create",
-#   "scopes": ["refund:create"],
-#   "tenant_id": "tenant_123",
-#   "context": {
-#       "risk_score": 42,
-#       "device_trust": true,
-#       "after_hours": false
-#   }
-# }
-#
-# Fail-closed model:
-#   If allow rule does not evaluate true → deny
-#
+package ztr.issue
 
 default allow = false
 
-
-#
-# Base allow rule
-#
-allow {
+allow if {
     valid_principal
+    valid_tenant
     valid_intent
     valid_scopes
-    valid_tenant
+    intent_matches_scope
+    trusted_device
+    valid_policy_revision
+    token_binding_present
     acceptable_risk
 }
 
-
-#
-# Principal validation
-#
-valid_principal {
+valid_principal if {
     input.principal != ""
 }
 
-
-#
-# Intent validation
-#
-valid_intent {
-    input.intent != ""
-}
-
-
-#
-# Scope validation
-#
-valid_scopes {
-    count(input.scopes) > 0
-}
-
-
-#
-# Tenant validation
-#
-valid_tenant {
+valid_tenant if {
     input.tenant_id != ""
 }
 
+valid_intent if {
+    input.intent != ""
+}
 
-#
-# Risk evaluation
-#
-acceptable_risk {
+valid_scopes if {
+    count(input.scopes) > 0
+}
+
+intent_matches_scope if {
+    input.intent == input.scopes[_]
+}
+
+trusted_device if {
+    input.context.device_trust == true
+}
+
+valid_policy_revision if {
+    input.policy_revision != ""
+}
+
+token_binding_present if {
+    input.context.session_binding != ""
+}
+
+acceptable_risk if {
     not high_risk
 }
 
-
-#
-# High risk condition
-#
-high_risk {
+high_risk if {
     input.context.risk_score >= 80
+}
+
+high_risk if {
+    input.context.after_hours == true
+    input.context.risk_score >= 60
 }

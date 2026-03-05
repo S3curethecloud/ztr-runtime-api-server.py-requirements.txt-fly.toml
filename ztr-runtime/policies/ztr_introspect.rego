@@ -3,9 +3,9 @@ package ztr.introspect
 default allow = false
 
 allow if {
-    count(input.principal) > 0
+    input.principal != ""
     count(input.scopes) > 0
-    count(input.tenant_id) > 0
+    input.tenant_id != ""
     input.policy_revision == current_policy_revision
 }
 
