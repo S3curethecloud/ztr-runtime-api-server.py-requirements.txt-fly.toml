@@ -38,6 +38,7 @@ from opa_bridge import evaluate_introspect_policy
 from admin import admin_router
 from api.tokens import tokens_router
 from api.sessions import sessions_router
+from api.policy import router as policy_router
 # from audit import audit_router
 # from revocations import revocations_router
 
@@ -50,6 +51,7 @@ app = FastAPI(title="Zero Trust Runtime")
 app.include_router(admin_router)
 app.include_router(tokens_router)
 app.include_router(sessions_router)
+app.include_router(policy_router)
 # app.include_router(audit_router)
 # app.include_router(revocations_router)
 

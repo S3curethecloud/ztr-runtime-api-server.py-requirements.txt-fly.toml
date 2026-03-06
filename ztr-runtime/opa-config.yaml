@@ -1,0 +1,11 @@
+services:
+  stc:
+    url: http://localhost:8000
+
+bundles:
+  runtime:
+    service: stc
+    resource: /v1/policy/bundle
+    polling:
+      min_delay_seconds: 10
+      max_delay_seconds: 20
