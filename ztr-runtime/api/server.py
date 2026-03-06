@@ -72,10 +72,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-REDIS_HOST     = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT     = int(os.getenv("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
-
 JWT_SECRET         = os.environ["ZTR_JWT_SECRET"]
 JWT_ISSUER         = "ztr-runtime"
 JWT_AUDIENCE       = "securethecloud"
@@ -83,10 +79,8 @@ JWT_VERSION        = "1.0"
 POLICY_REVISION    = os.environ["POLICY_REVISION"]
 JWT_SECRET_VERSION = os.environ["JWT_SECRET_VERSION"]
 
-r = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
+r = redis.from_url(
+    os.environ["REDIS_URL"],
     decode_responses=True,
 )
 
