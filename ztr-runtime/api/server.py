@@ -18,6 +18,8 @@
 #   5B-03: policy_revision + opa_result in introspect audit
 # =========================================================
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -34,6 +36,7 @@ from api.auth import require_tenant_api_key
 
 from audit_chain import emit_event, verify_chain, list_index, get_entry
 from opa_bridge import evaluate_introspect_policy
+from policy_subscriber import start_subscriber
 
 from admin import admin_router
 from api.tokens import tokens_router
@@ -42,7 +45,14 @@ from api.policy import router as policy_router
 # from audit import audit_router
 # from revocations import revocations_router
 
-app = FastAPI(title="Zero Trust Runtime")
+
+@asynccontextmanager
+async def lifespan(app):
+    start_subscriber()
+    yield
+
+
+app = FastAPI(title="Zero Trust Runtime", lifespan=lifespan)
 
 # ---------------------------------------------------------
 # ROUTER REGISTRATION
@@ -137,16 +147,11 @@ def audit_entry(
         raise HTTPException(status_code=404, detail="audit_entry_not_found")
     return entry
 
-# ---------------------------------------------------------
-# SAFE READ-ONLY DECISION STREAM
-# ---------------------------------------------------------
-
 @app.get("/v1/decisions")
 def list_recent_decisions(
     limit: int = 25,
     tenant_id: str = Depends(require_tenant_api_key),
 ):
-
     decision_event_types = [
         "runtime.token_introspected",
         "runtime.policy_denied",
@@ -156,7 +161,6 @@ def list_recent_decisions(
     events = []
 
     for event_type in decision_event_types:
-
         hashes = list_index(
             tenant_id=tenant_id,
             event_type=event_type,
@@ -164,7 +168,6 @@ def list_recent_decisions(
         )
 
         for h in hashes:
-
             entry = get_entry(h, tenant_id=tenant_id)
             if not entry:
                 continue
@@ -185,16 +188,11 @@ def list_recent_decisions(
 
     return {"events": events[:limit]}
 
-# ---------------------------------------------------------
-# DECISION EXPLANATION ENDPOINT
-# ---------------------------------------------------------
-
 @app.get("/v1/decisions/{event_hash}")
 def explain_decision(
     event_hash: str,
     tenant_id: str = Depends(require_tenant_api_key),
 ):
-
     entry = get_entry(event_hash=event_hash, tenant_id=tenant_id)
 
     if not entry:
@@ -214,15 +212,10 @@ def explain_decision(
         "correlation_id": entry.get("correlation_id"),
     }
 
-# ---------------------------------------------------------
-# SSE DECISION STREAM
-# ---------------------------------------------------------
-
 @app.get("/v1/decisions/stream")
 def stream_decisions(
     tenant_id: str = Depends(require_tenant_api_key),
 ):
-
     decision_event_types = [
         "runtime.token_introspected",
         "runtime.policy_denied",
@@ -230,15 +223,12 @@ def stream_decisions(
     ]
 
     def event_stream():
-
         last_seen = set()
 
         while True:
-
             events = []
 
             for event_type in decision_event_types:
-
                 hashes = list_index(
                     tenant_id=tenant_id,
                     event_type=event_type,
@@ -246,7 +236,6 @@ def stream_decisions(
                 )
 
                 for h in hashes:
-
                     if h in last_seen:
                         continue
 

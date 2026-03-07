@@ -1,8 +1,8 @@
 # =========================================================
 # opa_bridge.py — OPA Policy Re-Evaluation Bridge
-# SecureTheCloud — Phase 5B-01
+# SecureTheCloud — Phase 5B-01 / Phase 7.5-03
 #
-# Called at Layer 5 of /v1/introspect.
+# Called at Layer 5 of runtime policy evaluation.
 # Fail-closed on every error path — never fail-open.
 #
 # Env vars:
@@ -15,6 +15,8 @@ import time
 from typing import Any
 
 import httpx
+
+from policy_subscriber import get_cached_policy
 
 OPA_URL         = os.getenv("OPA_URL", "http://localhost:8181")
 OPA_POLICY_PATH = os.getenv("OPA_POLICY_PATH", "/v1/data/ztr/introspect/allow")
@@ -42,16 +44,22 @@ def evaluate_introspect_policy(
       Unexpected shape → { allow: False, reason: "opa_bad_response" }
 
     This function MUST NOT raise. It always returns a dict.
-    The caller (introspect) reads allow and raises HTTPException if False.
     """
+    cached_policy = get_cached_policy(tenant_id) or {}
+
+    merged_context = dict(context or {})
+    if cached_policy:
+        merged_context["cached_policy_version"] = cached_policy.get("version")
+        merged_context["cached_policy_digest"] = cached_policy.get("digest")
+
     input_payload = {
         "input": {
-            "principal":       principal       or "",
-            "scopes":          scopes          or [],
-            "intent":          intent          or "",
-            "tenant_id":       tenant_id       or "",
+            "principal":       principal or "",
+            "scopes":          scopes or [],
+            "intent":          intent or "",
+            "tenant_id":       tenant_id or "",
             "policy_revision": policy_revision or "",
-            "context":         context         or {},
+            "context":         merged_context,
             "ts":              int(time.time()),
         }
     }
@@ -72,6 +80,7 @@ def evaluate_introspect_policy(
             "allow":           False,
             "reason":          "opa_unavailable",
             "policy_revision": policy_revision,
+            "cached_policy":   cached_policy or None,
         }
 
     except httpx.HTTPStatusError as exc:
@@ -80,6 +89,7 @@ def evaluate_introspect_policy(
             "reason":          "opa_unavailable",
             "policy_revision": policy_revision,
             "detail":          str(exc),
+            "cached_policy":   cached_policy or None,
         }
 
     except Exception as exc:
@@ -88,15 +98,16 @@ def evaluate_introspect_policy(
             "reason":          "opa_error",
             "policy_revision": policy_revision,
             "detail":          str(exc),
+            "cached_policy":   cached_policy or None,
         }
 
-    # OPA response shape: { "result": true } or { "result": false }
     if not isinstance(body, dict) or "result" not in body:
         return {
             "allow":           False,
             "reason":          "opa_bad_response",
             "policy_revision": policy_revision,
             "detail":          f"unexpected body: {str(body)[:200]}",
+            "cached_policy":   cached_policy or None,
         }
 
     allowed = bool(body["result"])
@@ -104,6 +115,7 @@ def evaluate_introspect_policy(
         "allow":           allowed,
         "reason":          "opa_allow" if allowed else "opa_deny",
         "policy_revision": policy_revision,
+        "cached_policy":   cached_policy or None,
     }
 
 
@@ -116,16 +128,21 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
       OPA allow=false  → deny issuance
       OPA unavailable  → deny issuance
       Any exception    → deny issuance
-
-    This function MUST NOT raise.
     """
+    tenant_id = str(input_payload.get("tenant_id", "")).strip()
+    cached_policy = get_cached_policy(tenant_id) if tenant_id else None
+
+    enriched_input = dict(input_payload)
+    if cached_policy:
+        enriched_input["cached_policy_version"] = cached_policy.get("version")
+        enriched_input["cached_policy_digest"] = cached_policy.get("digest")
 
     url = OPA_URL.rstrip("/") + "/v1/data/ztr/issue/allow"
 
     try:
         resp = httpx.post(
             url,
-            json={"input": input_payload},
+            json={"input": enriched_input},
             timeout=OPA_TIMEOUT_S,
         )
         resp.raise_for_status()
@@ -135,12 +152,14 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
         return {
             "allow": False,
             "reason": "opa_unavailable",
+            "cached_policy": cached_policy or None,
         }
 
     if not isinstance(body, dict) or "result" not in body:
         return {
             "allow": False,
             "reason": "opa_bad_response",
+            "cached_policy": cached_policy or None,
         }
 
     allowed = bool(body["result"])
@@ -148,4 +167,5 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
     return {
         "allow": allowed,
         "reason": "opa_allow" if allowed else "opa_deny",
+        "cached_policy": cached_policy or None,
     }
