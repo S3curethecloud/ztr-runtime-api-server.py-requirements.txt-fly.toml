@@ -32,18 +32,11 @@ from pydantic import BaseModel
 from audit_chain import emit_event
 
 # ---------------------------------------------------------
-# Redis client
+# Redis client (DETERMINISTIC CONNECTION)
 # ---------------------------------------------------------
-REDIS_HOST     = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT     = int(os.getenv("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
-
-_r = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    username="default",
-    password=REDIS_PASSWORD,
-    decode_responses=True,
+_r = redis.from_url(
+    os.environ["REDIS_URL"],
+    decode_responses=True
 )
 
 # ---------------------------------------------------------
@@ -56,7 +49,6 @@ POLICY_REVISION = os.getenv("POLICY_REVISION", "dev-1")
 admin_router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
 MGMT_TENANT = "mgmt"
-
 
 # ---------------------------------------------------------
 # Auth dependency

@@ -3,15 +3,9 @@ import redis
 import os
 from fastapi import Header, HTTPException
 
-REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
-
-r = redis.Redis(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    password=REDIS_PASSWORD,
-    decode_responses=True,
+r = redis.from_url(
+    os.environ["REDIS_URL"],
+    decode_responses=True
 )
 
 def sha256(value: str) -> str:
