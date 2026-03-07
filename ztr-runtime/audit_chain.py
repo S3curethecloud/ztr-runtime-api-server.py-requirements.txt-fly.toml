@@ -244,3 +244,36 @@ def verify_chain(
         "events_verified": len(hashes),
         "chain_head": prev_hash,
     }
+
+
+def get_latest_event(tenant_id: str, event_type: str):
+    """
+    Return the most recent event of a given type for a tenant.
+    Used by runtime integrity checks.
+    """
+
+    pattern = f"audit:{tenant_id}:*"
+
+    latest = None
+    latest_ts = 0
+
+    for key in _audit_redis.scan_iter(pattern):
+        raw = _audit_redis.get(key)
+        if not raw:
+            continue
+
+        try:
+            event = json.loads(raw)
+        except Exception:
+            continue
+
+        if event.get("event_type") != event_type:
+            continue
+
+        ts = event.get("ts_ms", 0)
+
+        if ts > latest_ts:
+            latest = event
+            latest_ts = ts
+
+    return latest

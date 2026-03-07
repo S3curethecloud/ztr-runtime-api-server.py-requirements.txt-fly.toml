@@ -40,6 +40,12 @@ OPA_URL = os.getenv("OPA_URL", "http://localhost:8181")
 
 CHANNEL = "policy_updates"
 
+# Redis runtime projection client
+_r = redis.from_url(
+    REDIS_URL,
+    decode_responses=True
+)
+
 # ---------------------------------------------------------
 # In-memory policy pointer cache
 #
@@ -90,13 +96,6 @@ def flush_all_cache() -> None:
 
 # ---------------------------------------------------------
 # OPA probe
-#
-# OPA does not expose a universal "reload now" endpoint for
-# bundle polling mode. This probe is a best-effort signal
-# that OPA is reachable and may prompt near-term re-evaluation
-# paths in sidecar-style deployments.
-#
-# This is NOT a guaranteed forced reload.
 # ---------------------------------------------------------
 def _probe_opa(tenant_id: str) -> None:
     try:
@@ -170,6 +169,25 @@ def _handle_message(
     flush_cached_policy(tenant_id)
     set_cached_policy(tenant_id, policy_version, policy_digest)
 
+    # ---------------------------------------------------------
+    # Persist governance anchor digest for runtime verification
+    #
+    # This value represents the last control-plane-approved
+    # policy state and is used by opa_bridge.verify_projected_state()
+    # to detect out-of-band Redis tampering.
+    # ---------------------------------------------------------
+    try:
+        _r.set(
+            f"ztr:tenant:{tenant_id}:last_anchor_digest",
+            policy_digest,
+        )
+    except Exception as exc:
+        print(
+            f"[policy_subscriber][WARN] failed to persist anchor digest "
+            f"for tenant={tenant_id}: {exc}",
+            flush=True,
+        )
+
     # Optional runtime callback hook
     if on_update is not None:
         try:
@@ -187,8 +205,6 @@ def _handle_message(
 
 # ---------------------------------------------------------
 # Subscriber loop
-#
-# Reconnects on error with exponential backoff up to 30 sec.
 # ---------------------------------------------------------
 def _subscriber_loop(
     on_update: Optional[Callable[[str, str, str], None]] = None,
@@ -230,18 +246,6 @@ def _subscriber_loop(
 
 # ---------------------------------------------------------
 # Public API
-#
-# Call from server.py lifespan:
-#
-#   from contextlib import asynccontextmanager
-#   from policy_subscriber import start_subscriber
-#
-#   @asynccontextmanager
-#   async def lifespan(app):
-#       start_subscriber()
-#       yield
-#
-#   app = FastAPI(lifespan=lifespan)
 # ---------------------------------------------------------
 def start_subscriber(
     on_update: Optional[Callable[[str, str, str], None]] = None,
