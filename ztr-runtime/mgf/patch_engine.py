@@ -67,7 +67,6 @@ class Anchor:
             idx = text.find(self.pattern)
             if idx == -1:
                 die(f"Anchor literal not found: {self.pattern!r}")
-            # ensure only once
             if text.find(self.pattern, idx + 1) != -1:
                 die(f"Anchor literal appears multiple times (ambiguous): {self.pattern!r}")
             return idx, idx + len(self.pattern)
@@ -128,16 +127,22 @@ class DeleteLineOnce:
 
 def unified_diff(old: str, new: str, path: str) -> str:
     import difflib
+
     old_lines = old.splitlines(keepends=True)
     new_lines = new.splitlines(keepends=True)
-    diff = difflib.unified_diff(
+
+    diff = list(difflib.unified_diff(
         old_lines,
         new_lines,
         fromfile=f"a/{path}",
         tofile=f"b/{path}",
-        lineterm=""
-    )
-    return "\n".join(diff) + "\n"
+        lineterm="\n"
+    ))
+
+    if diff and not diff[-1].endswith("\n"):
+        diff[-1] = diff[-1] + "\n"
+
+    return "".join(diff)
 
 def ensure_git_repo() -> None:
     code, out, err = run(["git", "rev-parse", "--is-inside-work-tree"])
@@ -186,7 +191,6 @@ def main() -> None:
     old_text = old_bytes.decode("utf-8")
     before_hash = sha256_bytes(old_bytes)
 
-    # Parse rules (deterministic)
     edits = []
     applied_rules_meta = []
 
@@ -213,7 +217,6 @@ def main() -> None:
         else:
             die(f"Unknown rule type: {rtype}")
 
-    # Apply edits in order, refusing ambiguity
     new_text = old_text
     for e in edits:
         new_text, meta = e.apply(new_text)
@@ -231,7 +234,6 @@ def main() -> None:
     patch_path = Path(args.patch_out) if args.patch_out else (patch_dir / patch_name)
     patch_path.write_text(diff_text, encoding="utf-8")
 
-    # Apply patch deterministically
     apply_patch_file(patch_path)
 
     after_hash = sha256_file(target_path)
