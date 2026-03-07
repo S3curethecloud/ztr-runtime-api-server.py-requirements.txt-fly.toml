@@ -23,7 +23,7 @@ from api.auth import require_tenant_api_key
 from api.redis_keys import tenant_session_key, tenant_session_index_key
 from audit_chain import emit_event
 
-router = APIRouter()
+sessions_sessions_router = APIRouter()
 
 r = redis.from_url(
     os.environ["REDIS_URL"],
@@ -31,7 +31,7 @@ r = redis.from_url(
 )
 
 
-@router.post("/v1/sessions/revoke")
+@sessions_router.post("/v1/sessions/revoke")
 def revoke_session(
     body: dict = Body(...),
     tenant_id: str = Depends(require_tenant_api_key)

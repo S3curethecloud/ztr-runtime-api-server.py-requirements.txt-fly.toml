@@ -1,0 +1,28 @@
+{
+  "after_sha256": "dc17b5745e682061b5ac6c1be2a2e18bee0fd042f5d1f4817ed9d28277b9213f",
+  "before_sha256": "db2d9d74d0d7020606c65e42c65d06edcab2e01790e8f4d8007b6e4bfa768864",
+  "diff_stats": {
+    "added_lines": 2,
+    "deleted_lines": 2
+  },
+  "mgf_engine": "patch_engine_v1",
+  "patch_path": "mgf_patches/20260307T221504Z_api_sessions.py.patch",
+  "patch_sha256": "961936b0cbfe97852a3246f80d8b5933e108493400101ea89570812739ebed3e",
+  "rules_applied": [
+    {
+      "needle": "router = APIRouter()",
+      "type": "replace_literal_once"
+    },
+    {
+      "needle": "@router.post(\"/v1/sessions/revoke\")",
+      "type": "replace_literal_once"
+    }
+  ],
+  "target_path": "api/sessions.py",
+  "ts_utc": "20260307T221504Z",
+  "verification": {
+    "git_apply_indexed": true,
+    "non_empty_patch": true,
+    "target_exists": true
+  }
+}

@@ -1,0 +1,11 @@
+--- a/api/sessions.py
++++ b/api/sessions.py
+@@ -23,7 +23,7 @@
+ from api.redis_keys import tenant_session_key, tenant_session_index_key
+ from audit_chain import emit_event
+ 
+-sessions_sessions_router = APIRouter()
++sessions_router = APIRouter()
+ 
+ r = redis.from_url(
+     os.environ["REDIS_URL"],
