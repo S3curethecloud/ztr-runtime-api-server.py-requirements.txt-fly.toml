@@ -39,27 +39,24 @@ def verify_projected_state(tenant_id: str):
     if not redis_digest:
         return
 
-    # temporary placeholder until ledger query helper exists
-    latest_anchor = None
+    ledger_anchor = r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
 
-    if latest_anchor:
-        anchor_digest = latest_anchor["payload"].get("policy_digest")
+    if ledger_anchor and ledger_anchor != redis_digest:
 
-        if anchor_digest != redis_digest:
-            emit_event(
-                tenant_id=tenant_id,
-                event_type="runtime.tamper_suspected",
-                service="ztr-runtime",
-                payload={
-                    "redis_digest": redis_digest,
-                    "anchor_digest": anchor_digest
-                }
-            )
+        emit_event(
+            tenant_id=tenant_id,
+            event_type="runtime.tamper_suspected",
+            service="ztr-runtime",
+            payload={
+                "redis_digest": redis_digest,
+                "anchor_digest": ledger_anchor
+            }
+        )
 
-            raise HTTPException(
-                status_code=500,
-                detail="policy_state_tamper_detected"
-            )
+        raise HTTPException(
+            status_code=500,
+            detail="policy_state_tamper_detected"
+        )
 
 
 def evaluate_introspect_policy(

@@ -40,23 +40,8 @@ OPA_URL = os.getenv("OPA_URL", "http://localhost:8181")
 
 CHANNEL = "policy_updates"
 
-# Redis runtime projection client
-_r = redis.from_url(
-    REDIS_URL,
-    decode_responses=True
-)
-
 # ---------------------------------------------------------
 # In-memory policy pointer cache
-#
-# Shape:
-#   {
-#     tenant_id: {
-#       "version": str,
-#       "digest": str,
-#       "cached_at": int
-#     }
-#   }
 # ---------------------------------------------------------
 _policy_cache: dict[str, dict] = {}
 _cache_lock = threading.Lock()
@@ -123,17 +108,7 @@ def _handle_message(
     message: dict,
     on_update: Optional[Callable[[str, str, str], None]] = None,
 ) -> None:
-    """
-    Handle a single Redis pub/sub message.
 
-    Expected payload:
-      {
-        "tenant_id": "...",
-        "policy_version": "...",
-        "policy_digest": "...",
-        "ts": 1234567890
-      }
-    """
     if message.get("type") != "message":
         return
 
@@ -171,22 +146,13 @@ def _handle_message(
 
     # ---------------------------------------------------------
     # Persist governance anchor digest for runtime verification
-    #
-    # This value represents the last control-plane-approved
-    # policy state and is used by opa_bridge.verify_projected_state()
-    # to detect out-of-band Redis tampering.
     # ---------------------------------------------------------
-    try:
-        _r.set(
-            f"ztr:tenant:{tenant_id}:last_anchor_digest",
-            policy_digest,
-        )
-    except Exception as exc:
-        print(
-            f"[policy_subscriber][WARN] failed to persist anchor digest "
-            f"for tenant={tenant_id}: {exc}",
-            flush=True,
-        )
+    client = redis.from_url(REDIS_URL, decode_responses=True)
+
+    client.set(
+        f"ztr:tenant:{tenant_id}:policy_anchor",
+        policy_digest
+    )
 
     # Optional runtime callback hook
     if on_update is not None:
@@ -209,6 +175,7 @@ def _handle_message(
 def _subscriber_loop(
     on_update: Optional[Callable[[str, str, str], None]] = None,
 ) -> None:
+
     backoff = 1
 
     while True:
@@ -250,12 +217,7 @@ def _subscriber_loop(
 def start_subscriber(
     on_update: Optional[Callable[[str, str, str], None]] = None,
 ) -> threading.Thread:
-    """
-    Start the policy_updates subscriber as a background daemon thread.
 
-    Returns the running thread. If already started, returns the
-    existing thread instead of creating a duplicate.
-    """
     global _subscriber_thread
 
     with _subscriber_lock:

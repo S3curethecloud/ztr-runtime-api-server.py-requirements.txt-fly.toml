@@ -16,3 +16,4 @@ ztr-redis-config/
 
 # Logs
 *.log
+bundle.tar.gz
