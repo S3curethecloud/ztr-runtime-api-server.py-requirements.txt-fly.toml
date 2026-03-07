@@ -16,11 +16,54 @@ from typing import Any
 
 import httpx
 
+from fastapi import HTTPException
 from policy_subscriber import get_cached_policy
+from audit_chain import get_latest_event
+from audit_chain import emit_event
 
 OPA_URL         = os.getenv("OPA_URL", "http://localhost:8181")
 OPA_POLICY_PATH = os.getenv("OPA_POLICY_PATH", "/v1/data/ztr/introspect/allow")
 OPA_TIMEOUT_S   = float(os.getenv("OPA_TIMEOUT_S", "2.0"))
+
+
+def verify_tenant_state(tenant_id: str):
+
+    # Read projected Redis state
+    policy_ptr = r.hgetall(f"ztr:tenant:{tenant_id}:policy")
+
+    redis_digest = policy_ptr.get("digest")
+
+    if not redis_digest:
+        return
+
+    # Get latest anchor event for this tenant
+    anchor = get_latest_event(
+        tenant_id=tenant_id,
+        event_type="runtime.mgmt_anchor_observed"
+    )
+
+    if not anchor:
+        return
+
+    ledger_digest = anchor["payload"].get("policy_digest")
+
+    if redis_digest != ledger_digest:
+
+        emit_event(
+            tenant_id=tenant_id,
+            event_type="runtime.tamper_suspected",
+            service="ztr-runtime",
+            payload={
+                "redis_digest": redis_digest,
+                "ledger_digest": ledger_digest,
+                "detected_at": int(time.time())
+            }
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="policy_state_tamper_detected"
+        )
 
 
 def evaluate_introspect_policy(
@@ -45,6 +88,9 @@ def evaluate_introspect_policy(
 
     This function MUST NOT raise. It always returns a dict.
     """
+
+    verify_tenant_state(tenant_id)
+
     cached_policy = get_cached_policy(tenant_id) or {}
 
     merged_context = dict(context or {})
@@ -129,7 +175,11 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
       OPA unavailable  → deny issuance
       Any exception    → deny issuance
     """
+
     tenant_id = str(input_payload.get("tenant_id", "")).strip()
+
+    verify_tenant_state(tenant_id)
+
     cached_policy = get_cached_policy(tenant_id) if tenant_id else None
 
     enriched_input = dict(input_payload)
