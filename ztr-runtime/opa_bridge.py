@@ -12,42 +12,37 @@
 
 import os
 import time
+import redis
 from typing import Any
 
 import httpx
 
 from fastapi import HTTPException
 from policy_subscriber import get_cached_policy
-from audit_chain import get_latest_event
 from audit_chain import emit_event
+
+r = redis.from_url(
+    os.environ["REDIS_URL"],
+    decode_responses=True,
+)
 
 OPA_URL         = os.getenv("OPA_URL", "http://localhost:8181")
 OPA_POLICY_PATH = os.getenv("OPA_POLICY_PATH", "/v1/data/ztr/introspect/allow")
 OPA_TIMEOUT_S   = float(os.getenv("OPA_TIMEOUT_S", "2.0"))
 
 
-def verify_tenant_state(tenant_id: str):
+def verify_projected_state(tenant_id: str):
 
-    # Read projected Redis state
     policy_ptr = r.hgetall(f"ztr:tenant:{tenant_id}:policy")
-
     redis_digest = policy_ptr.get("digest")
 
     if not redis_digest:
         return
 
-    # Get latest anchor event for this tenant
-    anchor = get_latest_event(
-        tenant_id=tenant_id,
-        event_type="runtime.mgmt_anchor_observed"
-    )
+    # fetch last mgmt anchor event for tenant
+    anchor = r.get(f"ztr:tenant:{tenant_id}:last_anchor_digest")
 
-    if not anchor:
-        return
-
-    ledger_digest = anchor["payload"].get("policy_digest")
-
-    if redis_digest != ledger_digest:
+    if anchor and anchor != redis_digest:
 
         emit_event(
             tenant_id=tenant_id,
@@ -55,8 +50,7 @@ def verify_tenant_state(tenant_id: str):
             service="ztr-runtime",
             payload={
                 "redis_digest": redis_digest,
-                "ledger_digest": ledger_digest,
-                "detected_at": int(time.time())
+                "anchor_digest": anchor
             }
         )
 
@@ -89,7 +83,7 @@ def evaluate_introspect_policy(
     This function MUST NOT raise. It always returns a dict.
     """
 
-    verify_tenant_state(tenant_id)
+    verify_projected_state(tenant_id)
 
     cached_policy = get_cached_policy(tenant_id) or {}
 
@@ -178,7 +172,7 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
 
     tenant_id = str(input_payload.get("tenant_id", "")).strip()
 
-    verify_tenant_state(tenant_id)
+    verify_projected_state(tenant_id)
 
     cached_policy = get_cached_policy(tenant_id) if tenant_id else None
 
