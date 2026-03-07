@@ -4,11 +4,22 @@ from api.auth import require_tenant_api_key
 from opa_bridge import evaluate_issue_policy
 
 import uuid
+import redis
+import os
+from api.redis_keys import tenant_session_key, tenant_session_index_key
+
 import time
 import json
 import hashlib
 
 tokens_router = APIRouter(prefix="/v1", tags=["tokens"])
+
+REDIS_URL = os.environ["REDIS_URL"]
+
+r = redis.from_url(
+    REDIS_URL,
+    decode_responses=True,
+)
 
 
 @tokens_router.post("/tokens:issue")
@@ -42,6 +53,34 @@ def issue_token(
 
     if not opa_result.get("allow"):
         raise HTTPException(status_code=403, detail="policy_denied")
+
+    # ---------------------------------------------------------
+    # Create session record
+    # ---------------------------------------------------------
+
+    sid = str(uuid.uuid4())
+
+    session_key = tenant_session_key(tenant_id, sid)
+    session_index_key = tenant_session_index_key(tenant_id)
+
+    session_record = {
+        "sid": sid,
+        "principal": req.principal,
+        "intent": req.intent,
+        "scopes": ",".join(req.scopes),
+        "issued_at": int(time.time()),
+        "ttl": req.ttl_seconds
+    }
+
+    pipe = r.pipeline()
+
+    pipe.hset(session_key, mapping=session_record)
+
+    pipe.expire(session_key, req.ttl_seconds)
+
+    pipe.sadd(session_index_key, sid)
+
+    pipe.execute()
 
     # -------------------------------------------------
     # Continue with existing issuance logic
