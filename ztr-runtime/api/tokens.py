@@ -1,16 +1,35 @@
+# =========================================================
+# tokens.py — Token Issuance + Session Creation
+# SecureTheCloud — Phase 6
+#
+# Endpoint
+#   POST /v1/tokens/issue
+#
+# Flow
+#   1. Validate tenant API key
+#   2. Evaluate OPA issuance policy
+#   3. Create session record in Redis
+#   4. Index session ID
+# =========================================================
+
 from fastapi import APIRouter, Depends, HTTPException
+
 from api.models import TokenIssueRequest
 from api.auth import require_tenant_api_key
 from opa_bridge import evaluate_issue_policy
 
+from api.redis_keys import (
+    tenant_session_key,
+    tenant_session_index_key
+)
+
 import uuid
 import redis
 import os
-from api.redis_keys import tenant_session_key, tenant_session_index_key
-
 import time
 import json
 import hashlib
+
 
 tokens_router = APIRouter(prefix="/v1", tags=["tokens"])
 
@@ -18,16 +37,20 @@ REDIS_URL = os.environ["REDIS_URL"]
 
 r = redis.from_url(
     REDIS_URL,
-    decode_responses=True,
+    decode_responses=True
 )
 
+
+# ---------------------------------------------------------
+# POST /v1/tokens/issue
+# ---------------------------------------------------------
 
 @tokens_router.post("/tokens/issue")
 def issue_token(
     req: TokenIssueRequest,
     tenant_id: str = Depends(require_tenant_api_key),
 ):
-    sid = f"SID-{uuid.uuid4().hex}"
+
     now = int(time.time())
 
     # -------------------------------------------------
@@ -52,7 +75,10 @@ def issue_token(
     opa_result = evaluate_issue_policy(policy_input)
 
     if not opa_result.get("allow"):
-        raise HTTPException(status_code=403, detail="policy_denied")
+        raise HTTPException(
+            status_code=403,
+            detail="policy_denied"
+        )
 
     # ---------------------------------------------------------
     # Create session record
@@ -61,30 +87,28 @@ def issue_token(
     sid = str(uuid.uuid4())
 
     session_key = tenant_session_key(tenant_id, sid)
-    session_index_key = tenant_session_index_key(tenant_id)
+    session_index = tenant_session_index_key(tenant_id)
 
     session_record = {
         "sid": sid,
         "principal": req.principal,
         "intent": req.intent,
-        "scopes": ",".join(req.scopes),
-        "issued_at": int(time.time()),
+        "scopes": json.dumps(req.scopes),
+        "issued_at": now,
         "ttl": req.ttl_seconds
     }
 
     pipe = r.pipeline()
 
     pipe.hset(session_key, mapping=session_record)
-
     pipe.expire(session_key, req.ttl_seconds)
-
-    pipe.sadd(session_index_key, sid)
+    pipe.sadd(session_index, sid)
 
     pipe.execute()
 
-    # -------------------------------------------------
-    # Continue with existing issuance logic
-    # -------------------------------------------------
+    # ---------------------------------------------------------
+    # Response
+    # ---------------------------------------------------------
 
     return {
         "status": "issued",

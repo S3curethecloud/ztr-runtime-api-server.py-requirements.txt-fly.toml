@@ -6,14 +6,22 @@
 #   GET  /v1/sessions/active
 #   POST /v1/sessions/revoke
 #
-# Uses canonical Redis keys from redis_keys.py
+# Behavior
+#   - Lists active runtime sessions
+#   - Lazily cleans expired session index entries
+#   - Allows operator-driven session revocation
+#
+# Redis Model
+#   ztr:{tenant}:session:{sid}        -> HASH (TTL)
+#   ztr:{tenant}:sessions             -> SET  (index)
 # =========================================================
 
 import os
 import redis
 import time
+import json
 
-from fastapi import APIRouter, HTTPException, Body, Depends
+from fastapi import APIRouter, Depends, HTTPException, Body
 
 from api.auth import require_tenant_api_key
 from api.redis_keys import (
@@ -33,7 +41,7 @@ r = redis.from_url(
 
 
 # ---------------------------------------------------------
-# List Active Sessions
+# GET /v1/sessions/active
 # ---------------------------------------------------------
 
 @sessions_router.get("/active")
@@ -53,18 +61,20 @@ def list_active_sessions(
 
         data = r.hgetall(key)
 
-        # cleanup stale index entries
+        # lazy cleanup of expired or missing sessions
         if not data:
             r.srem(index_key, sid)
             continue
 
+        issued_at = int(data.get("issued_at", 0))
         ttl = r.ttl(key)
 
         sessions.append({
             "session_id": sid,
             "principal": data.get("principal"),
             "intent": data.get("intent"),
-            "issued_at": data.get("issued_at"),
+            "scopes": json.loads(data.get("scopes", "[]")),
+            "issued_at": issued_at,
             "ttl": ttl,
             "risk": data.get("risk")
         })
@@ -77,7 +87,7 @@ def list_active_sessions(
 
 
 # ---------------------------------------------------------
-# Revoke Session
+# POST /v1/sessions/revoke
 # ---------------------------------------------------------
 
 @sessions_router.post("/revoke")
@@ -112,12 +122,12 @@ def revoke_session(
 
     emit_event(
         tenant_id=tenant_id,
-        event_type="session_revoked",
+        event_type="runtime.session_revoked",
+        service="ztr-runtime",
         payload={
             "session_id": sid,
             "revoked_at": int(time.time())
-        },
-        service="runtime"
+        }
     )
 
     return {
