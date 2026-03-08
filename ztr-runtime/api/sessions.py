@@ -1,36 +1,30 @@
 # =========================================================
-# sessions.py — Session Revocation Engine
-# SecureTheCloud — Phase 8 Step 3
+# sessions.py — Session Lifecycle Control
+# SecureTheCloud — Phase 8
 #
-# Purpose:
-#   Terminate active runtime sessions.
+# Endpoints
+#   GET  /v1/sessions/active
+#   POST /v1/sessions/revoke
 #
-# Behavior:
-#   1. Validate tenant API key
-#   2. Locate session key
-#   3. Delete session record
-#   4. Remove sid from session index
-#   5. Emit audit-chain event
+# Uses canonical Redis keys from redis_keys.py
 # =========================================================
 
 import os
 import redis
 import time
-import json
 
 from fastapi import APIRouter, HTTPException, Body, Depends
 
 from api.auth import require_tenant_api_key
 from api.redis_keys import (
     tenant_session_key,
-    tenant_session_index_key,
-    session_index_key,
-    session_key
+    tenant_session_index_key
 )
 
 from audit_chain import emit_event
 
-sessions_router = APIRouter()
+
+sessions_router = APIRouter(prefix="/v1/sessions", tags=["sessions"])
 
 r = redis.from_url(
     os.environ["REDIS_URL"],
@@ -38,14 +32,59 @@ r = redis.from_url(
 )
 
 
-@sessions_router.post("/v1/sessions/revoke")
+# ---------------------------------------------------------
+# List Active Sessions
+# ---------------------------------------------------------
+
+@sessions_router.get("/active")
+def list_active_sessions(
+    tenant_id: str = Depends(require_tenant_api_key)
+):
+
+    index_key = tenant_session_index_key(tenant_id)
+
+    sids = r.smembers(index_key)
+
+    sessions = []
+
+    for sid in list(sids):
+
+        key = tenant_session_key(tenant_id, sid)
+
+        data = r.hgetall(key)
+
+        # cleanup stale index entries
+        if not data:
+            r.srem(index_key, sid)
+            continue
+
+        ttl = r.ttl(key)
+
+        sessions.append({
+            "session_id": sid,
+            "principal": data.get("principal"),
+            "intent": data.get("intent"),
+            "issued_at": data.get("issued_at"),
+            "ttl": ttl,
+            "risk": data.get("risk")
+        })
+
+    return {
+        "tenant_id": tenant_id,
+        "active_sessions": len(sessions),
+        "sessions": sessions
+    }
+
+
+# ---------------------------------------------------------
+# Revoke Session
+# ---------------------------------------------------------
+
+@sessions_router.post("/revoke")
 def revoke_session(
     body: dict = Body(...),
     tenant_id: str = Depends(require_tenant_api_key)
 ):
-    """
-    Revoke an active session.
-    """
 
     sid = body.get("session_id")
 
@@ -55,10 +94,10 @@ def revoke_session(
             detail="session_id required"
         )
 
-    redis_session_key = tenant_session_key(tenant_id, sid)
-    session_index = tenant_session_index_key(tenant_id)
+    key = tenant_session_key(tenant_id, sid)
+    index_key = tenant_session_index_key(tenant_id)
 
-    if not r.exists(redis_session_key):
+    if not r.exists(key):
         raise HTTPException(
             status_code=404,
             detail="session_not_found"
@@ -66,8 +105,8 @@ def revoke_session(
 
     pipe = r.pipeline()
 
-    pipe.delete(redis_session_key)
-    pipe.srem(session_index, sid)
+    pipe.delete(key)
+    pipe.srem(index_key, sid)
 
     pipe.execute()
 
@@ -84,53 +123,6 @@ def revoke_session(
     return {
         "status": "revoked",
         "tenant_id": tenant_id,
-        "session_id": sid
-    }
-
-
-@sessions_router.get("/v1/sessions/active")
-def list_active_sessions(
-    tenant_id: str = Depends(require_tenant_api_key)
-):
-
-    index_key = session_index_key(tenant_id)
-
-    cursor = 0
-    session_ids = []
-
-    while True:
-        cursor, batch = r.sscan(index_key, cursor, count=100)
-        session_ids.extend(batch)
-        if cursor == 0:
-            break
-
-    active_sessions = []
-
-    for sid in list(session_ids):
-
-        key = session_key(tenant_id, sid)
-
-        data = r.hgetall(key)
-
-        if not data:
-            r.srem(index_key, sid)
-            continue
-
-        session = data
-
-        ttl = r.ttl(key)
-
-        active_sessions.append({
-            "session_id": sid,
-            "principal": session.get("principal"),
-            "intent": session.get("intent"),
-            "issued_at": session.get("issued_at"),
-            "ttl": ttl,
-            "risk": session.get("risk")
-        })
-
-    return {
-        "tenant_id": tenant_id,
-        "active_sessions": len(active_sessions),
-        "sessions": active_sessions
+        "session_id": sid,
+        "revoked_at": int(time.time())
     }
