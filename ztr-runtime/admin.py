@@ -39,12 +39,14 @@ import os
 import secrets
 import time
 from typing import Optional
+import datetime
 
 import redis
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from audit_chain import emit_event
+from api.redis_keys import tenant_usage_key
 
 # ---------------------------------------------------------
 # Redis client — LOCKED BASELINE
@@ -80,6 +82,13 @@ def _sha256(value: str) -> str:
 
 
 # ---------------------------------------------------------
+# Helper to get current period (YYYY-MM format)
+# ---------------------------------------------------------
+def current_period() -> str:
+    return datetime.datetime.utcnow().strftime("%Y-%m")
+
+
+# ---------------------------------------------------------
 # Phase 7-02 — Sequencer helper
 # ---------------------------------------------------------
 def _mgmt_emit(event_type: str, payload: dict) -> dict:
@@ -93,15 +102,6 @@ def _mgmt_emit(event_type: str, payload: dict) -> dict:
 
 # ---------------------------------------------------------
 # Phase 7-03 / 7.5 — Anchor helper
-#
-# Accepts explicit policy_version and policy_digest so the
-# anchor always records the EFFECTIVE policy state for that
-# specific mutation — not the static env POLICY_REVISION.
-#
-# Callers must pass the version/digest that was actually
-# applied during the operation.
-#
-# Non-fatal: swallows exceptions, never rolls back Redis.
 # ---------------------------------------------------------
 def _tenant_anchor(
     tenant_id: str,
@@ -129,10 +129,6 @@ def _tenant_anchor(
 
 # ---------------------------------------------------------
 # Phase 7.5-02 — Token invalidation helper
-#
-# Scans all session/token keys for this tenant and sets
-# TTL=0 (expires immediately). Global Revocation step.
-# Non-fatal: logs on error.
 # ---------------------------------------------------------
 def _invalidate_tenant_tokens(tenant_id: str) -> int:
     count = 0
@@ -157,7 +153,6 @@ def _invalidate_tenant_tokens(tenant_id: str) -> int:
 
 # ---------------------------------------------------------
 # Phase 7.5-02 — Publish policy_updates notification
-# Non-fatal.
 # ---------------------------------------------------------
 def _publish_policy_update(tenant_id: str, policy_version: str, policy_digest: str) -> None:
     try:
@@ -186,20 +181,11 @@ class IssueKeyRequest(BaseModel):
 
 class UpdatePolicyRequest(BaseModel):
     policy_version: str
-    policy_digest:  Optional[str] = None  # auto-computed if omitted
+    policy_digest:  Optional[str] = None
 
 
 # ---------------------------------------------------------
 # POST /v1/admin/tenants
-#
-# Phase 7.5-01: also writes projected state keys:
-#   ztr:tenant:{id}:config  — full config blob
-#   ztr:tenant:{id}:policy  — policy pointer hash
-#   ztr:tenant:{id}:status  — "active"
-#
-# Anchor records POLICY_REVISION as the effective policy
-# at creation time (correct — no tenant-specific policy
-# exists yet at creation).
 # ---------------------------------------------------------
 @admin_router.post("/tenants", status_code=201)
 def create_tenant(
@@ -227,7 +213,6 @@ def create_tenant(
         "created_at": now,
     }
 
-    # 7-02: mgmt ledger FIRST — fail-closed
     try:
         mgmt_event = _mgmt_emit(
             event_type="admin.tenant_created",
@@ -242,10 +227,8 @@ def create_tenant(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"mgmt_ledger_write_failed: {exc}")
 
-    # 7-02: Redis mutations only after ledger succeeds
     _r.set(meta_key, json.dumps(meta))
 
-    # 7.5-01: Projected state keys — ztr:tenant:{id}:... namespace
     _r.set(
         f"ztr:tenant:{tenant_id}:config",
         json.dumps({
@@ -256,6 +239,7 @@ def create_tenant(
             "version":        1,
         }),
     )
+
     _r.hset(
         f"ztr:tenant:{tenant_id}:policy",
         mapping={
@@ -263,9 +247,9 @@ def create_tenant(
             "digest":  policy_digest,
         },
     )
+
     _r.set(f"ztr:tenant:{tenant_id}:status", "active")
 
-    # 7-03 / 7.5: Anchor records effective policy at creation
     _tenant_anchor(
         tenant_id,
         mgmt_event["event_hash"],
@@ -285,8 +269,6 @@ def create_tenant(
 
 # ---------------------------------------------------------
 # GET /v1/admin/tenants/{tenant_id}/usage
-#
-# Retrieve tenant's usage stats for the current period
 # ---------------------------------------------------------
 @admin_router.get("/tenants/{tenant_id}/usage")
 def get_tenant_usage(
