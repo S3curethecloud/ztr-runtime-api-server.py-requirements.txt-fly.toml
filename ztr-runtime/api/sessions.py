@@ -20,13 +20,15 @@ import os
 import redis
 import time
 import json
+import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Body
 
 from api.auth import require_tenant_api_key
 from api.redis_keys import (
     tenant_session_key,
-    tenant_session_index_key
+    tenant_session_index_key,
+    tenant_usage_key
 )
 
 from audit_chain import emit_event
@@ -38,6 +40,14 @@ r = redis.from_url(
     os.environ["REDIS_URL"],
     decode_responses=True
 )
+
+
+# ---------------------------------------------------------
+# Helper to get the current period (Year-Month)
+# ---------------------------------------------------------
+
+def current_period() -> str:
+    return datetime.datetime.utcnow().strftime("%Y-%m")
 
 
 # ---------------------------------------------------------
@@ -119,6 +129,10 @@ def revoke_session(
     pipe.srem(index_key, sid)
 
     pipe.execute()
+
+    # Increment the sessions_revoked counter for the current period
+    period = current_period()
+    r.incr(tenant_usage_key(tenant_id, period, "sessions_revoked"))
 
     emit_event(
         tenant_id=tenant_id,

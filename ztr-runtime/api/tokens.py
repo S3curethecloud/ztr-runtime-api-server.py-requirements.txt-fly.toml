@@ -20,7 +20,8 @@ from opa_bridge import evaluate_issue_policy
 
 from api.redis_keys import (
     tenant_session_key,
-    tenant_session_index_key
+    tenant_session_index_key,
+    tenant_usage_key
 )
 
 import uuid
@@ -29,6 +30,7 @@ import os
 import time
 import json
 import hashlib
+import datetime
 
 
 tokens_router = APIRouter(prefix="/v1", tags=["tokens"])
@@ -39,6 +41,14 @@ r = redis.from_url(
     REDIS_URL,
     decode_responses=True
 )
+
+
+# ---------------------------------------------------------
+# Helper to get the current period (Year-Month)
+# ---------------------------------------------------------
+
+def current_period() -> str:
+    return datetime.datetime.utcnow().strftime("%Y-%m")
 
 
 # ---------------------------------------------------------
@@ -75,6 +85,9 @@ def issue_token(
     opa_result = evaluate_issue_policy(policy_input)
 
     if not opa_result.get("allow"):
+        # Increment the policy_denied counter for the current period
+        period = current_period()
+        r.incr(tenant_usage_key(tenant_id, period, "policy_denied"))
         raise HTTPException(
             status_code=403,
             detail="policy_denied"
@@ -105,6 +118,10 @@ def issue_token(
     pipe.sadd(session_index, sid)
 
     pipe.execute()
+
+    # Increment the tokens_issued counter for the current period
+    period = current_period()
+    r.incr(tenant_usage_key(tenant_id, period, "tokens_issued"))
 
     # ---------------------------------------------------------
     # Response

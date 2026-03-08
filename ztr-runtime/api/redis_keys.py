@@ -10,7 +10,6 @@
 #   ztr:tenant:{tenant_id}:{resource}:{suffix}
 # =========================================================
 
-
 def tenant_base(tenant_id: str) -> str:
     return f"ztr:tenant:{tenant_id}"
 
