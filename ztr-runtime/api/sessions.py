@@ -16,14 +16,21 @@
 import os
 import redis
 import time
+import json
 
 from fastapi import APIRouter, HTTPException, Body, Depends
 
 from api.auth import require_tenant_api_key
-from api.redis_keys import tenant_session_key, tenant_session_index_key
+from api.redis_keys import (
+    tenant_session_key,
+    tenant_session_index_key,
+    session_index_key,
+    session_key
+)
+
 from audit_chain import emit_event
 
-sessions_router = APIRouter(tags=["sessions"])
+sessions_router = APIRouter()
 
 r = redis.from_url(
     os.environ["REDIS_URL"],
@@ -48,10 +55,10 @@ def revoke_session(
             detail="session_id required"
         )
 
-    session_key = tenant_session_key(tenant_id, sid)
+    redis_session_key = tenant_session_key(tenant_id, sid)
     session_index = tenant_session_index_key(tenant_id)
 
-    if not r.exists(session_key):
+    if not r.exists(redis_session_key):
         raise HTTPException(
             status_code=404,
             detail="session_not_found"
@@ -59,7 +66,7 @@ def revoke_session(
 
     pipe = r.pipeline()
 
-    pipe.delete(session_key)
+    pipe.delete(redis_session_key)
     pipe.srem(session_index, sid)
 
     pipe.execute()
@@ -78,4 +85,52 @@ def revoke_session(
         "status": "revoked",
         "tenant_id": tenant_id,
         "session_id": sid
+    }
+
+
+@sessions_router.get("/v1/sessions/active")
+def list_active_sessions(
+    tenant_id: str = Depends(require_tenant_api_key)
+):
+
+    index_key = session_index_key(tenant_id)
+
+    cursor = 0
+    session_ids = []
+
+    while True:
+        cursor, batch = r.sscan(index_key, cursor, count=100)
+        session_ids.extend(batch)
+        if cursor == 0:
+            break
+
+    active_sessions = []
+
+    for sid in list(session_ids):
+
+        key = session_key(tenant_id, sid)
+
+        data = r.hgetall(key)
+
+        if not data:
+            r.srem(index_key, sid)
+            continue
+
+        session = data
+
+        ttl = r.ttl(key)
+
+        active_sessions.append({
+            "session_id": sid,
+            "principal": session.get("principal"),
+            "intent": session.get("intent"),
+            "issued_at": session.get("issued_at"),
+            "ttl": ttl,
+            "risk": session.get("risk")
+        })
+
+    return {
+        "tenant_id": tenant_id,
+        "active_sessions": len(active_sessions),
+        "sessions": active_sessions
     }

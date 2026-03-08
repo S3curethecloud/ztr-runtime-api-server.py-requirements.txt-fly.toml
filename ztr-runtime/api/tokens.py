@@ -22,7 +22,7 @@ r = redis.from_url(
 )
 
 
-@tokens_router.post("/tokens:issue")
+@tokens_router.post("/tokens/issue")
 def issue_token(
     req: TokenIssueRequest,
     tenant_id: str = Depends(require_tenant_api_key),
