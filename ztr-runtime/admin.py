@@ -48,6 +48,11 @@ _r = redis.from_url(
 )
 
 # ---------------------------------------------------------
+# Billing configuration
+# ---------------------------------------------------------
+TOKEN_PRICE_CENTS = int(os.getenv("TOKEN_PRICE_CENTS", "1"))
+
+# ---------------------------------------------------------
 # Admin secret
 # ---------------------------------------------------------
 ADMIN_SECRET    = os.environ.get("ADMIN_SECRET", "")
@@ -245,7 +250,6 @@ def create_tenant(
 
 # ---------------------------------------------------------
 # POST /v1/admin/provision
-# One-call tenant provisioning
 # ---------------------------------------------------------
 @admin_router.post("/provision", status_code=201)
 def provision_tenant(
@@ -342,4 +346,39 @@ def get_tenant_usage(
         "tenant_id": tenant_id,
         "period": period,
         "usage": usage
+    }
+
+
+# ---------------------------------------------------------
+# GET /v1/admin/tenants/{tenant_id}/billing
+# ---------------------------------------------------------
+@admin_router.get("/tenants/{tenant_id}/billing")
+def get_tenant_billing(
+    tenant_id: str,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    tenant_id = tenant_id.strip().lower()
+    period = current_period()
+
+    tokens_issued = int(_r.get(tenant_usage_key(tenant_id, period, "tokens_issued")) or 0)
+    policy_denied = int(_r.get(tenant_usage_key(tenant_id, period, "policy_denied")) or 0)
+    sessions_revoked = int(_r.get(tenant_usage_key(tenant_id, period, "sessions_revoked")) or 0)
+
+    amount_cents = tokens_issued * TOKEN_PRICE_CENTS
+
+    return {
+        "tenant_id": tenant_id,
+        "period": period,
+        "billing": {
+            "billable_metric": "tokens_issued",
+            "unit_price_cents": TOKEN_PRICE_CENTS,
+            "quantity": tokens_issued,
+            "amount_cents": amount_cents,
+        },
+        "signals": {
+            "policy_denied": policy_denied,
+            "sessions_revoked": sessions_revoked,
+        }
     }
