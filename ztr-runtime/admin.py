@@ -382,8 +382,6 @@ def list_tenants(
 
 # ---------------------------------------------------------
 # GET /v1/admin/tenants/{tenant_id}/sessions
-#
-# Returns active sessions for a tenant.
 # ---------------------------------------------------------
 @admin_router.get("/tenants/{tenant_id}/sessions")
 def list_tenant_sessions(
@@ -425,4 +423,45 @@ def list_tenant_sessions(
         "tenant_id": tenant_id,
         "active_sessions": len(sessions),
         "sessions": sessions
+    }
+
+
+# ---------------------------------------------------------
+# GET /v1/admin/runtime
+#
+# Runtime health snapshot for operators.
+#
+# Read-only. No state mutation.
+# ---------------------------------------------------------
+@admin_router.get("/runtime")
+def runtime_health(
+    x_stc_admin_secret: str = Header(None),
+):
+
+    _require_admin(x_stc_admin_secret)
+
+    redis_status = "ok"
+
+    try:
+        _r.ping()
+    except Exception:
+        redis_status = "error"
+
+    tenant_count = 0
+    for _ in _r.scan_iter("ztr:tenant:*:meta"):
+        tenant_count += 1
+
+    active_sessions = 0
+
+    for key in _r.scan_iter("ztr:tenant:*:session_index"):
+        sids = _r.smembers(key)
+        active_sessions += len(sids)
+
+    return {
+        "status": "ok" if redis_status == "ok" else "degraded",
+        "redis": redis_status,
+        "policy_revision": POLICY_REVISION,
+        "tenant_count": tenant_count,
+        "active_sessions": active_sessions,
+        "period": current_period()
     }
