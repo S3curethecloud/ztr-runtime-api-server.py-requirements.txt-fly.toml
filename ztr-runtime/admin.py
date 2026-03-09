@@ -465,3 +465,55 @@ def runtime_health(
         "active_sessions": active_sessions,
         "period": current_period()
     }
+
+
+# ---------------------------------------------------------
+# GET /v1/admin/metrics
+#
+# Platform-wide metrics aggregation across all tenants.
+# Read-only control-plane endpoint.
+# ---------------------------------------------------------
+@admin_router.get("/metrics")
+def platform_metrics(
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    period = current_period()
+
+    tokens_issued = 0
+    policy_denied = 0
+    sessions_revoked = 0
+
+    # Aggregate counters across all tenants
+    for key in _r.scan_iter(f"ztr:tenant:*:usage:{period}:tokens_issued"):
+        tokens_issued += int(_r.get(key) or 0)
+
+    for key in _r.scan_iter(f"ztr:tenant:*:usage:{period}:policy_denied"):
+        policy_denied += int(_r.get(key) or 0)
+
+    for key in _r.scan_iter(f"ztr:tenant:*:usage:{period}:sessions_revoked"):
+        sessions_revoked += int(_r.get(key) or 0)
+
+    # Active sessions across platform
+    active_sessions = 0
+    for key in _r.scan_iter("ztr:tenant:*:session_index"):
+        active_sessions += len(_r.smembers(key))
+
+    # Tenant count
+    tenant_count = 0
+    for _ in _r.scan_iter("ztr:tenant:*:meta"):
+        tenant_count += 1
+
+    return {
+        "period": period,
+        "metrics": {
+            "tokens_issued": tokens_issued,
+            "policy_denied": policy_denied,
+            "sessions_revoked": sessions_revoked,
+        },
+        "platform": {
+            "tenant_count": tenant_count,
+            "active_sessions": active_sessions
+        }
+    }
