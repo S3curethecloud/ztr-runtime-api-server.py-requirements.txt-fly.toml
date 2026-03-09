@@ -1,6 +1,6 @@
 # =========================================================
 # admin.py — Tenant + API Key Management
-# SecureTheCloud — Phase 7.5
+# SecureTheCloud — Phase 8
 #
 # Phase 5A-05: original tenant/key CRUD
 # Phase 7 deltas:
@@ -20,17 +20,8 @@
 #   7.5-02: PUT /v1/admin/tenants/{tenant_id}/status
 #           Kill-switch: sets ztr:tenant:{id}:status = disabled
 #
-# Key naming convention — LOCKED:
-#   All projected state keys use ztr:tenant:{id}:... prefix
-#   consistent with existing runtime key namespace.
-#
-# Redis connection: LOCKED BASELINE
-#   redis.from_url(os.environ["REDIS_URL"])
-#   redis.from_url(os.environ["REDIS_AUDIT_URL"])  ← audit chain
-#
-# Pub/Sub channel: policy_updates
-#   Payload: {"tenant_id": ..., "policy_version": ...,
-#             "policy_digest": ..., "ts": ...}
+# Phase 8 delta:
+#   One-call tenant provisioning endpoint
 # =========================================================
 
 import hashlib
@@ -38,15 +29,17 @@ import json
 import os
 import secrets
 import time
+import uuid
 from typing import Optional
 import datetime
 
 import redis
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Depends
 from pydantic import BaseModel
 
 from audit_chain import emit_event
-from api.redis_keys import tenant_usage_key
+from api.auth import require_admin
+from api.redis_keys import tenant_base, apikey_lookup_key, tenant_usage_key
 
 # ---------------------------------------------------------
 # Redis client — LOCKED BASELINE
@@ -152,7 +145,7 @@ def _invalidate_tenant_tokens(tenant_id: str) -> int:
 
 
 # ---------------------------------------------------------
-# Phase 7.5-02 — Publish policy_updates notification
+# Phase 7.5 — Publish policy_updates notification
 # ---------------------------------------------------------
 def _publish_policy_update(tenant_id: str, policy_version: str, policy_digest: str) -> None:
     try:
@@ -182,6 +175,11 @@ class IssueKeyRequest(BaseModel):
 class UpdatePolicyRequest(BaseModel):
     policy_version: str
     policy_digest:  Optional[str] = None
+
+
+class ProvisionRequest(BaseModel):
+    tenant_id: str
+    label: str
 
 
 # ---------------------------------------------------------
@@ -264,6 +262,53 @@ def create_tenant(
         "label":           req.label,
         "policy_version":  policy_version,
         "mgmt_event_hash": mgmt_event["event_hash"],
+    }
+
+
+# ---------------------------------------------------------
+# Phase 8 — One-Call Tenant Provisioning
+# ---------------------------------------------------------
+@admin_router.post("/provision")
+def provision_tenant(
+    req: ProvisionRequest,
+    admin_secret: str = Depends(require_admin)
+):
+    tenant_id = req.tenant_id
+    label = req.label
+
+    if _r.exists(tenant_base(tenant_id)):
+        raise HTTPException(status_code=400, detail="tenant_exists")
+
+    tenant_metadata = {
+        "tenant_id": tenant_id,
+        "label": label,
+        "created_at": int(time.time())
+    }
+
+    _r.hset(tenant_base(tenant_id), mapping=tenant_metadata)
+
+    key_hash = hashlib.sha256(tenant_id.encode()).hexdigest()
+    api_key = str(uuid.uuid4())
+
+    _r.set(apikey_lookup_key(key_hash), api_key)
+
+    emit_event(
+        tenant_id=tenant_id,
+        event_type="tenant_provisioned",
+        payload={
+            "tenant_id": tenant_id,
+            "label": label,
+            "api_key": api_key,
+            "created_at": tenant_metadata["created_at"]
+        },
+        service="admin"
+    )
+
+    return {
+        "status": "provisioned",
+        "tenant_id": tenant_id,
+        "api_key": api_key,
+        "mgmt_event_hash": tenant_metadata["created_at"]
     }
 
 
