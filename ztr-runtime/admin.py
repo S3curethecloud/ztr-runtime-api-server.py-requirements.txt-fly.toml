@@ -386,14 +386,6 @@ def get_tenant_billing(
 
 # ---------------------------------------------------------
 # GET /v1/admin/tenants/{tenant_id}/summary
-#
-# Aggregated tenant view combining:
-#   - tenant status
-#   - policy version
-#   - usage counters
-#   - billing preview
-#
-# Read-only. No state mutation.
 # ---------------------------------------------------------
 @admin_router.get("/tenants/{tenant_id}/summary")
 def get_tenant_summary(
@@ -437,4 +429,51 @@ def get_tenant_summary(
             "quantity": tokens_issued,
             "amount_cents": amount_cents,
         }
+    }
+
+
+# ---------------------------------------------------------
+# GET /v1/admin/tenants
+#
+# Lists all tenants with minimal metadata.
+#
+# Read-only. No state mutation.
+# ---------------------------------------------------------
+@admin_router.get("/tenants")
+def list_tenants(
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    tenants = []
+
+    for key in _r.scan_iter("ztr:tenant:*:meta"):
+
+        raw = _r.get(key)
+        if not raw:
+            continue
+
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+
+        tenant_id = data.get("tenant_id")
+
+        status = _r.get(f"ztr:tenant:{tenant_id}:status")
+
+        policy = _r.hgetall(f"ztr:tenant:{tenant_id}:policy")
+        policy_version = policy.get("version")
+
+        tenants.append({
+            "tenant_id": tenant_id,
+            "label": data.get("label"),
+            "status": status,
+            "policy_version": policy_version,
+            "created_at": data.get("created_at"),
+        })
+
+    return {
+        "count": len(tenants),
+        "tenants": tenants
     }
