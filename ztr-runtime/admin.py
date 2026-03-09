@@ -382,3 +382,59 @@ def get_tenant_billing(
             "sessions_revoked": sessions_revoked,
         }
     }
+
+
+# ---------------------------------------------------------
+# GET /v1/admin/tenants/{tenant_id}/summary
+#
+# Aggregated tenant view combining:
+#   - tenant status
+#   - policy version
+#   - usage counters
+#   - billing preview
+#
+# Read-only. No state mutation.
+# ---------------------------------------------------------
+@admin_router.get("/tenants/{tenant_id}/summary")
+def get_tenant_summary(
+    tenant_id: str,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    tenant_id = tenant_id.strip().lower()
+    period = current_period()
+
+    status = _r.get(f"ztr:tenant:{tenant_id}:status")
+
+    policy = _r.hgetall(f"ztr:tenant:{tenant_id}:policy")
+
+    policy_version = policy.get("version")
+    policy_digest = policy.get("digest")
+
+    tokens_issued = int(_r.get(tenant_usage_key(tenant_id, period, "tokens_issued")) or 0)
+    policy_denied = int(_r.get(tenant_usage_key(tenant_id, period, "policy_denied")) or 0)
+    sessions_revoked = int(_r.get(tenant_usage_key(tenant_id, period, "sessions_revoked")) or 0)
+
+    amount_cents = tokens_issued * TOKEN_PRICE_CENTS
+
+    return {
+        "tenant_id": tenant_id,
+        "status": status,
+        "policy": {
+            "version": policy_version,
+            "digest": policy_digest,
+        },
+        "period": period,
+        "usage": {
+            "tokens_issued": tokens_issued,
+            "policy_denied": policy_denied,
+            "sessions_revoked": sessions_revoked,
+        },
+        "billing": {
+            "billable_metric": "tokens_issued",
+            "unit_price_cents": TOKEN_PRICE_CENTS,
+            "quantity": tokens_issued,
+            "amount_cents": amount_cents,
+        }
+    }
