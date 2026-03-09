@@ -29,17 +29,15 @@ import json
 import os
 import secrets
 import time
-import uuid
 from typing import Optional
 import datetime
 
 import redis
-from fastapi import APIRouter, Header, HTTPException, Depends
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from audit_chain import emit_event
-from api.auth import require_admin
-from api.redis_keys import tenant_base, apikey_lookup_key, tenant_usage_key
+from api.redis_keys import tenant_usage_key
 
 # ---------------------------------------------------------
 # Redis client — LOCKED BASELINE
@@ -100,8 +98,8 @@ def _tenant_anchor(
     tenant_id: str,
     mgmt_event_hash: str,
     operation: str,
-    policy_version: str,
-    policy_digest: str,
+    policy_version: str = "",
+    policy_digest: str = "",
 ) -> None:
     try:
         emit_event(
@@ -174,12 +172,13 @@ class IssueKeyRequest(BaseModel):
 
 class UpdatePolicyRequest(BaseModel):
     policy_version: str
-    policy_digest:  Optional[str] = None
+    policy_digest: Optional[str] = None
 
 
-class ProvisionRequest(BaseModel):
+class ProvisionTenantRequest(BaseModel):
     tenant_id: str
     label: str
+    key_label: str = "root"
 
 
 # ---------------------------------------------------------
@@ -206,8 +205,8 @@ def create_tenant(
     policy_digest  = _sha256(POLICY_REVISION)
 
     meta = {
-        "tenant_id":  tenant_id,
-        "label":      req.label,
+        "tenant_id": tenant_id,
+        "label": req.label,
         "created_at": now,
     }
 
@@ -215,38 +214,17 @@ def create_tenant(
         mgmt_event = _mgmt_emit(
             event_type="admin.tenant_created",
             payload={
-                "tenant_id":      tenant_id,
-                "label":          req.label,
-                "created_at":     now,
+                "tenant_id": tenant_id,
+                "label": req.label,
+                "created_at": now,
                 "policy_version": policy_version,
-                "policy_digest":  policy_digest,
+                "policy_digest": policy_digest,
             },
         )
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"mgmt_ledger_write_failed: {exc}")
 
     _r.set(meta_key, json.dumps(meta))
-
-    _r.set(
-        f"ztr:tenant:{tenant_id}:config",
-        json.dumps({
-            "tenant_id":      tenant_id,
-            "label":          req.label,
-            "created_at":     now,
-            "policy_version": policy_version,
-            "version":        1,
-        }),
-    )
-
-    _r.hset(
-        f"ztr:tenant:{tenant_id}:policy",
-        mapping={
-            "version": policy_version,
-            "digest":  policy_digest,
-        },
-    )
-
-    _r.set(f"ztr:tenant:{tenant_id}:status", "active")
 
     _tenant_anchor(
         tenant_id,
@@ -257,58 +235,87 @@ def create_tenant(
     )
 
     return {
-        "status":          "created",
-        "tenant_id":       tenant_id,
-        "label":           req.label,
-        "policy_version":  policy_version,
+        "status": "created",
+        "tenant_id": tenant_id,
+        "label": req.label,
+        "policy_version": policy_version,
         "mgmt_event_hash": mgmt_event["event_hash"],
     }
 
 
 # ---------------------------------------------------------
-# Phase 8 — One-Call Tenant Provisioning
+# POST /v1/admin/provision
+# One-call tenant provisioning
 # ---------------------------------------------------------
-@admin_router.post("/provision")
+@admin_router.post("/provision", status_code=201)
 def provision_tenant(
-    req: ProvisionRequest,
-    admin_secret: str = Depends(require_admin)
+    req: ProvisionTenantRequest,
+    x_stc_admin_secret: str = Header(None),
 ):
-    tenant_id = req.tenant_id
-    label = req.label
+    _require_admin(x_stc_admin_secret)
 
-    if _r.exists(tenant_base(tenant_id)):
-        raise HTTPException(status_code=400, detail="tenant_exists")
+    tenant_id = req.tenant_id.strip().lower()
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="tenant_id required")
 
-    tenant_metadata = {
+    meta_key = f"ztr:tenant:{tenant_id}:meta"
+
+    if _r.exists(meta_key):
+        raise HTTPException(status_code=409, detail="tenant_already_exists")
+
+    created_at = int(time.time())
+
+    meta = {
         "tenant_id": tenant_id,
-        "label": label,
-        "created_at": int(time.time())
+        "label": req.label,
+        "created_at": created_at,
     }
 
-    _r.hset(tenant_base(tenant_id), mapping=tenant_metadata)
+    api_key = secrets.token_urlsafe(32)
+    key_hash = _sha256(api_key)
 
-    key_hash = hashlib.sha256(tenant_id.encode()).hexdigest()
-    api_key = str(uuid.uuid4())
+    key_record = {
+        "tenant_id": tenant_id,
+        "label": req.key_label,
+        "issued_at": created_at,
+        "key_hash": key_hash,
+    }
 
-    _r.set(apikey_lookup_key(key_hash), api_key)
+    try:
+        mgmt_event = _mgmt_emit(
+            event_type="admin.tenant_provisioned",
+            payload={
+                "tenant_id": tenant_id,
+                "label": req.label,
+                "key_label": req.key_label,
+                "key_hash": key_hash,
+                "created_at": created_at,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"mgmt_ledger_write_failed: {exc}")
 
-    emit_event(
-        tenant_id=tenant_id,
-        event_type="tenant_provisioned",
-        payload={
-            "tenant_id": tenant_id,
-            "label": label,
-            "api_key": api_key,
-            "created_at": tenant_metadata["created_at"]
-        },
-        service="admin"
+    pipe = _r.pipeline()
+    pipe.set(meta_key, json.dumps(meta))
+    pipe.set(f"ztr:apikey:{key_hash}", tenant_id)
+    pipe.set(f"ztr:tenant:{tenant_id}:key:{key_hash}", json.dumps(key_record))
+    pipe.rpush(f"ztr:tenant:{tenant_id}:keys", key_hash)
+    pipe.execute()
+
+    _tenant_anchor(
+        tenant_id,
+        mgmt_event["event_hash"],
+        "tenant_provisioned"
     )
 
     return {
         "status": "provisioned",
         "tenant_id": tenant_id,
+        "label": req.label,
+        "key_label": req.key_label,
+        "key_hash": key_hash,
         "api_key": api_key,
-        "mgmt_event_hash": tenant_metadata["created_at"]
+        "mgmt_event_hash": mgmt_event["event_hash"],
     }
 
 

@@ -10,6 +10,7 @@
 #   2. Evaluate OPA issuance policy
 #   3. Create session record in Redis
 #   4. Index session ID
+#   5. Sign JWT token
 # =========================================================
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -31,6 +32,7 @@ import time
 import json
 import hashlib
 import datetime
+import jwt
 
 
 tokens_router = APIRouter(prefix="/v1", tags=["tokens"])
@@ -41,6 +43,15 @@ r = redis.from_url(
     REDIS_URL,
     decode_responses=True
 )
+
+# ---------------------------------------------------------
+# JWT Configuration
+# ---------------------------------------------------------
+
+JWT_SECRET = os.environ["ZTR_JWT_SECRET"]
+JWT_ISSUER = "ztr-runtime"
+JWT_AUDIENCE = "securethecloud"
+JWT_VERSION = "1.0"
 
 
 # ---------------------------------------------------------
@@ -124,6 +135,31 @@ def issue_token(
     r.incr(tenant_usage_key(tenant_id, period, "tokens_issued"))
 
     # ---------------------------------------------------------
+    # JWT Signing
+    # ---------------------------------------------------------
+
+    exp = now + req.ttl_seconds
+
+    token_payload = {
+        "iss": JWT_ISSUER,
+        "aud": JWT_AUDIENCE,
+        "tid": tenant_id,
+        "sid": sid,
+        "sub": req.principal,
+        "intent": req.intent,
+        "scopes": req.scopes,
+        "ver": JWT_VERSION,
+        "iat": now,
+        "exp": exp,
+    }
+
+    signed_token = jwt.encode(
+        token_payload,
+        JWT_SECRET,
+        algorithm="HS256"
+    )
+
+    # ---------------------------------------------------------
     # Response
     # ---------------------------------------------------------
 
@@ -135,4 +171,5 @@ def issue_token(
         "intent": req.intent,
         "expires_in": req.ttl_seconds,
         "issued_at": now,
+        "token": signed_token,
     }
