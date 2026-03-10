@@ -1,0 +1,54 @@
+groups:
+  - name: stc-runtime-alerts
+    rules:
+
+      - alert: PolicyDenialSpike
+        expr: increase(stc_policy_denied[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Policy denial spike detected"
+          description: "More than 10 policy denials occurred within 5 minutes."
+
+      - alert: TokenIssuanceSpike
+        expr: increase(stc_tokens_issued[5m]) > 50
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Token issuance spike detected"
+          description: "More than 50 tokens were issued within 5 minutes."
+
+      - alert: SessionRevocationSpike
+        expr: increase(stc_sessions_revoked[5m]) > 10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Session revocation spike detected"
+          description: "More than 10 sessions were revoked within 5 minutes."
+
+      - alert: HighDecisionLatency
+        expr: stc_decision_latency_ms > 100
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High decision latency"
+
+      - alert: HighOPALatency
+        expr: stc_opa_latency_ms > 50
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High OPA latency"
+
+      - alert: HighRedisLatency
+        expr: stc_redis_latency_ms > 50
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Redis latency"

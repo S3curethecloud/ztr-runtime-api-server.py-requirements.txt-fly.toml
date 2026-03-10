@@ -25,6 +25,8 @@ from api.redis_keys import (
     tenant_usage_key
 )
 
+from api.streaming import publish_decision
+
 import uuid
 import redis
 import os
@@ -96,9 +98,20 @@ def issue_token(
     opa_result = evaluate_issue_policy(policy_input)
 
     if not opa_result.get("allow"):
-        # Increment the policy_denied counter for the current period
+
         period = current_period()
         r.incr(tenant_usage_key(tenant_id, period, "policy_denied"))
+
+        publish_decision({
+            "tenant": tenant_id,
+            "principal": req.principal,
+            "intent": req.intent,
+            "decision": "deny",
+            "policy_revision": policy_input["policy_revision"],
+            "risk_score": req.context.get("risk_score", 0),
+            "timestamp": now
+        })
+
         raise HTTPException(
             status_code=403,
             detail="policy_denied"
@@ -158,6 +171,16 @@ def issue_token(
         JWT_SECRET,
         algorithm="HS256"
     )
+
+    publish_decision({
+        "tenant": tenant_id,
+        "principal": req.principal,
+        "intent": req.intent,
+        "decision": "allow",
+        "policy_revision": policy_input["policy_revision"],
+        "risk_score": req.context.get("risk_score", 0),
+        "timestamp": now
+    })
 
     # ---------------------------------------------------------
     # Response

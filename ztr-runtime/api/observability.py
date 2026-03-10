@@ -13,6 +13,9 @@ router = APIRouter(prefix="/v1")
 REDIS_URL = os.getenv("REDIS_URL")
 redis_client = Redis.from_url(REDIS_URL, decode_responses=True)
 
+# alias for deterministic usage in tenant metrics
+_r = redis_client
+
 
 def get_runtime_revision() -> str:
     return os.getenv("RUNTIME_REVISION", "unknown")
@@ -30,6 +33,14 @@ def read_counter(name: str) -> int:
 def read_latency(name: str) -> float:
     value = redis_client.get(name)
     return float(value) if value else 0.0
+
+
+def current_period() -> str:
+    return time.strftime("%Y-%m")
+
+
+def tenant_usage_key(tenant_id: str, period: str, metric: str) -> str:
+    return f"usage:{tenant_id}:{period}:{metric}"
 
 
 @router.get("/runtime/activity")
@@ -109,5 +120,37 @@ stc_opa_latency_ms {opa_latency}
 # TYPE stc_redis_latency_ms gauge
 stc_redis_latency_ms {redis_latency}
 """
+
+    # --------------------------------------------------
+    # Tenant-level metrics
+    # --------------------------------------------------
+
+    period = current_period()
+
+    for key in _r.scan_iter("ztr:tenant:*:meta"):
+
+        try:
+            tenant_id = key.split(":")[2]
+
+            issued = int(
+                _r.get(tenant_usage_key(tenant_id, period, "tokens_issued")) or 0
+            )
+
+            denied = int(
+                _r.get(tenant_usage_key(tenant_id, period, "policy_denied")) or 0
+            )
+
+            revoked = int(
+                _r.get(tenant_usage_key(tenant_id, period, "sessions_revoked")) or 0
+            )
+
+            output += f"""
+stc_tokens_issued{{tenant="{tenant_id}"}} {issued}
+stc_policy_denied{{tenant="{tenant_id}"}} {denied}
+stc_sessions_revoked{{tenant="{tenant_id}"}} {revoked}
+"""
+
+        except Exception:
+            continue
 
     return Response(content=output, media_type="text/plain")
