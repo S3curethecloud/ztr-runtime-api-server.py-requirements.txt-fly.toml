@@ -517,3 +517,52 @@ def platform_metrics(
             "active_sessions": active_sessions
         }
     }
+
+# ---------------------------------------------------------
+# GET /v1/admin/decision-heatmap
+#
+# Control-plane visualization endpoint.
+# Aggregates tenant usage counters for the current period.
+# Safe: read-only, no runtime mutation.
+# ---------------------------------------------------------
+@admin_router.get("/decision-heatmap")
+def decision_heatmap(
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    period = current_period()
+
+    tenants = []
+
+    for key in _r.scan_iter("ztr:tenant:*:meta"):
+
+        try:
+            tenant_id = key.split(":")[2]
+
+            issued = int(
+                _r.get(tenant_usage_key(tenant_id, period, "tokens_issued")) or 0
+            )
+
+            denied = int(
+                _r.get(tenant_usage_key(tenant_id, period, "policy_denied")) or 0
+            )
+
+            revoked = int(
+                _r.get(tenant_usage_key(tenant_id, period, "sessions_revoked")) or 0
+            )
+
+            tenants.append({
+                "tenant_id": tenant_id,
+                "tokens_issued": issued,
+                "policy_denied": denied,
+                "sessions_revoked": revoked
+            })
+
+        except Exception:
+            continue
+
+    return {
+        "period": period,
+        "tenants": tenants
+    }

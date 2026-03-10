@@ -39,6 +39,7 @@ from opa_bridge import evaluate_introspect_policy
 from policy_subscriber import start_subscriber
 
 from admin import admin_router
+from admin.anomalies import router as anomalies_router
 from api.tokens import tokens_router
 from api.sessions import sessions_router
 from api.policy import router as policy_router
@@ -60,6 +61,7 @@ app = FastAPI(title="Zero Trust Runtime", lifespan=lifespan)
 # ---------------------------------------------------------
 
 app.include_router(admin_router)
+app.include_router(anomalies_router)
 app.include_router(tokens_router)
 app.include_router(sessions_router)
 app.include_router(policy_router)

@@ -2,7 +2,7 @@
 # Phase 9 Runtime Observability Layer
 # Deterministic telemetry endpoints
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from redis import Redis
 from typing import Dict, Any
 import os
@@ -77,3 +77,37 @@ def runtime_metrics() -> Dict[str, Any]:
         "redis_latency_ms": read_latency("metric:redis_latency_ms"),
         "timestamp": int(time.time())
     }
+
+
+@router.get("/metrics/prometheus")
+def prometheus_metrics():
+
+    tokens = read_counter("metric:tokens_issued")
+    denied = read_counter("metric:policy_denied")
+    revoked = read_counter("metric:sessions_revoked")
+
+    decision_latency = read_latency("metric:decision_latency_ms")
+    opa_latency = read_latency("metric:opa_latency_ms")
+    redis_latency = read_latency("metric:redis_latency_ms")
+
+    output = f"""
+# TYPE stc_tokens_issued counter
+stc_tokens_issued {tokens}
+
+# TYPE stc_policy_denied counter
+stc_policy_denied {denied}
+
+# TYPE stc_sessions_revoked counter
+stc_sessions_revoked {revoked}
+
+# TYPE stc_decision_latency_ms gauge
+stc_decision_latency_ms {decision_latency}
+
+# TYPE stc_opa_latency_ms gauge
+stc_opa_latency_ms {opa_latency}
+
+# TYPE stc_redis_latency_ms gauge
+stc_redis_latency_ms {redis_latency}
+"""
+
+    return Response(content=output, media_type="text/plain")
