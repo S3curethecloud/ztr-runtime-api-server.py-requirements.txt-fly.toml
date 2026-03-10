@@ -38,7 +38,7 @@ from audit_chain import emit_event, verify_chain, list_index, get_entry
 from opa_bridge import evaluate_introspect_policy
 from policy_subscriber import start_subscriber
 
-from admin import admin_router
+from admin_router import admin_router
 from admin.anomalies import router as anomalies_router
 from api.tokens import tokens_router
 from api.sessions import sessions_router
