@@ -1,58 +1,62 @@
 import json
 import asyncio
+import redis
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
+import os
 
 router = APIRouter()
 
-# --------------------------------------------------
-# Subscriber registry
-# --------------------------------------------------
+REDIS_URL = os.environ["REDIS_URL"]
 
-subscribers = set()
+r = redis.from_url(
+    REDIS_URL,
+    decode_responses=True
+)
+
+CHANNEL = "stc_decisions"
 
 # --------------------------------------------------
 # Publish decision events
 # --------------------------------------------------
 
-async def publish_decision(event: dict):
+def publish_decision(event: dict):
 
-    dead = []
-
-    for queue in subscribers:
-        try:
-            queue.put_nowait(event)
-        except asyncio.QueueFull:
-            dead.append(queue)
-
-    for q in dead:
-        subscribers.discard(q)
+    r.publish(CHANNEL, json.dumps(event))
 
 # --------------------------------------------------
-# Event generator for each subscriber
+# Stream events
 # --------------------------------------------------
 
-async def event_generator(queue):
+async def event_generator():
 
-    try:
-        while True:
-            event = await queue.get()
-            yield f"data: {json.dumps(event)}\n\n"
-    finally:
-        subscribers.discard(queue)
+    pubsub = r.pubsub()
+
+    pubsub.subscribe(CHANNEL)
+
+    loop = asyncio.get_event_loop()
+
+    while True:
+
+        message = await loop.run_in_executor(
+            None,
+            pubsub.get_message,
+            True,
+            None
+        )
+
+        if message and message["type"] == "message":
+
+            yield f"data: {message['data']}\n\n"
 
 # --------------------------------------------------
-# Streaming endpoint
+# Endpoint
 # --------------------------------------------------
 
 @router.get("/decisions/stream")
 async def stream_decisions():
 
-    queue = asyncio.Queue(maxsize=100)
-
-    subscribers.add(queue)
-
     return StreamingResponse(
-        event_generator(queue),
+        event_generator(),
         media_type="text/event-stream"
     )
