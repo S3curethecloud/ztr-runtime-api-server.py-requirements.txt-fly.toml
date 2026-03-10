@@ -143,6 +143,12 @@ def issue_token(
 
     pipe.execute()
 
+    # ---------------------------------------------------------
+    # Active session counter (O(1) health metric)
+    # ---------------------------------------------------------
+
+    r.incr("ztr:sessions:active")
+
     # Increment the tokens_issued counter for the current period
     period = current_period()
     r.incr(tenant_usage_key(tenant_id, period, "tokens_issued"))

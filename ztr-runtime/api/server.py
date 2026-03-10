@@ -112,17 +112,59 @@ class RevocationRequest(TokenIssueRequest.__class__):
     decision_hash: str
     timestamp_ms:  int
 
+
 @app.get("/health")
 def health():
+
     try:
-        session_count = sum(1 for _ in r.scan_iter("ztr:*:session:*"))
+        session_count = int(r.get("ztr:sessions:active") or 0)
     except Exception:
         session_count = None
+
     return {
-        "status":          "ok",
+        "status": "ok",
         "active_sessions": session_count,
-        "policy_rev":      POLICY_REVISION,
+        "policy_rev": POLICY_REVISION,
     }
+
+
+# ---------------------------------------------------------
+# Runtime Integrity Endpoint
+# ---------------------------------------------------------
+
+@app.get("/v1/runtime/integrity")
+def runtime_integrity():
+
+    checks = {}
+
+    # Redis check
+    try:
+        r.ping()
+        checks["redis"] = True
+    except Exception:
+        checks["redis"] = False
+
+    # Policy revision
+    policy_rev = POLICY_REVISION
+
+    # Runtime revision
+    runtime_rev = os.getenv("RUNTIME_REVISION", "unknown")
+
+    # Audit chain integrity
+    try:
+        result = verify_chain(limit=1)
+        audit_status = result.get("status")
+    except Exception:
+        audit_status = "failed"
+
+    return {
+        "runtime_revision": runtime_rev,
+        "policy_revision": policy_rev,
+        "redis_ok": checks["redis"],
+        "audit_chain": audit_status,
+        "timestamp": int(time.time())
+    }
+
 
 @app.get("/v1/audit/verify")
 def audit_verify(
@@ -130,6 +172,7 @@ def audit_verify(
     tenant_id: str = Depends(require_tenant_api_key),
 ):
     return verify_chain(tenant_id=tenant_id, limit=limit)
+
 
 @app.get("/v1/audit/index/{event_type}")
 def audit_index(
@@ -143,6 +186,7 @@ def audit_index(
         "hashes":     list_index(tenant_id=tenant_id, event_type=event_type, limit=limit),
     }
 
+
 @app.get("/v1/audit/entry/{event_hash}")
 def audit_entry(
     event_hash: str,
@@ -152,6 +196,7 @@ def audit_entry(
     if not entry:
         raise HTTPException(status_code=404, detail="audit_entry_not_found")
     return entry
+
 
 @app.get("/v1/decisions")
 def list_recent_decisions(
@@ -194,6 +239,7 @@ def list_recent_decisions(
 
     return {"events": events[:limit]}
 
+
 @app.get("/v1/decisions/{event_hash}")
 def explain_decision(
     event_hash: str,
@@ -217,6 +263,7 @@ def explain_decision(
         "reason": payload.get("reason") or payload.get("opa_result"),
         "correlation_id": entry.get("correlation_id"),
     }
+
 
 @app.get("/v1/decisions/stream")
 def stream_decisions(

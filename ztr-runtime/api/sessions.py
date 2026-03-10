@@ -130,6 +130,12 @@ def revoke_session(
 
     pipe.execute()
 
+    # ---------------------------------------------------------
+    # Active session counter update
+    # ---------------------------------------------------------
+
+    r.decr("ztr:sessions:active")
+
     # Increment the sessions_revoked counter for the current period
     period = current_period()
     r.incr(tenant_usage_key(tenant_id, period, "sessions_revoked"))
