@@ -26,6 +26,7 @@ from api.redis_keys import (
 )
 
 from api.streaming import publish_decision
+from audit_chain import emit_event
 
 import uuid
 import redis
@@ -194,6 +195,22 @@ def issue_token(
     }
 
     publish_decision(event)
+
+    # ---------------------------------------------------------
+    # Emit Audit Chain Event (for Blast Radius stream)
+    # ---------------------------------------------------------
+
+    emit_event(
+        tenant_id=tenant_id,
+        event_type="runtime.token_introspected",
+        service="ztr-runtime",
+        payload={
+            "principal": req.principal,
+            "intent": req.intent,
+            "result": "allow",
+            "policy_revision": policy_input["policy_revision"]
+        }
+    )
 
     # ---------------------------------------------------------
     # Response
