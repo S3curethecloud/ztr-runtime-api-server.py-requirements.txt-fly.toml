@@ -100,7 +100,7 @@ async def issue_token(
 
     if not opa_result.get("allow"):
 
-        await r.incr("metrics:policy_denied")
+        r.incr("metrics:policy_denied")
 
         period = current_period()
         r.incr(tenant_usage_key(tenant_id, period, "policy_denied"))
@@ -186,8 +186,8 @@ async def issue_token(
     # Metrics Counters (Governance Instruction)
     # ---------------------------------------------------------
 
-    await r.incr("metrics:tokens_issued")
-    await r.incr("metrics:policy_allowed")
+    r.incr("metrics:tokens_issued")
+    r.incr("metrics:policy_allowed")
 
     # ---------------------------------------------------------
     # Publish Decision Telemetry
