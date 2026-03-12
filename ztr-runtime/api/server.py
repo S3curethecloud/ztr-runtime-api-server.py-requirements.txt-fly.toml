@@ -232,31 +232,6 @@ def list_recent_decisions(
     return {"events": events[:limit]}
 
 
-@app.get("/v1/decisions/{event_hash}")
-def explain_decision(
-    event_hash: str,
-    tenant_id: str = Depends(require_tenant_api_key),
-):
-    entry = get_entry(event_hash=event_hash, tenant_id=tenant_id)
-
-    if not entry:
-        raise HTTPException(status_code=404, detail="decision_not_found")
-
-    payload = entry.get("payload", {})
-
-    return {
-        "event_hash": entry.get("event_hash"),
-        "event_type": entry.get("event_type"),
-        "timestamp": entry.get("ts_ms"),
-        "principal": payload.get("principal"),
-        "intent": payload.get("intent"),
-        "result": payload.get("result"),
-        "policy_revision": payload.get("policy_revision"),
-        "reason": payload.get("reason") or payload.get("opa_result"),
-        "correlation_id": entry.get("correlation_id"),
-    }
-
-
 @app.get("/v1/decisions/stream")
 def stream_decisions(
     tenant_id: str = Depends(require_tenant_api_key),
@@ -311,3 +286,28 @@ def stream_decisions(
         event_stream(),
         media_type="text/event-stream",
     )
+
+
+@app.get("/v1/decisions/{event_hash}")
+def explain_decision(
+    event_hash: str,
+    tenant_id: str = Depends(require_tenant_api_key),
+):
+    entry = get_entry(event_hash=event_hash, tenant_id=tenant_id)
+
+    if not entry:
+        raise HTTPException(status_code=404, detail="decision_not_found")
+
+    payload = entry.get("payload", {})
+
+    return {
+        "event_hash": entry.get("event_hash"),
+        "event_type": entry.get("event_type"),
+        "timestamp": entry.get("ts_ms"),
+        "principal": payload.get("principal"),
+        "intent": payload.get("intent"),
+        "result": payload.get("result"),
+        "policy_revision": payload.get("policy_revision"),
+        "reason": payload.get("reason") or payload.get("opa_result"),
+        "correlation_id": entry.get("correlation_id"),
+    }
