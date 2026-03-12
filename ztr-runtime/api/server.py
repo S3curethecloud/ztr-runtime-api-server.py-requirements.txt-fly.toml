@@ -79,6 +79,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://securethecloud.dev",
+        "https://app.securethecloud.dev",
         "https://stc-intelligence-core.pages.dev",
         "https://shield.securethecloud.dev",
         "https://console.securethecloud.dev",

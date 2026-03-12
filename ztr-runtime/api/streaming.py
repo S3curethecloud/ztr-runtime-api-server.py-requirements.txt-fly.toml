@@ -14,7 +14,7 @@ r = redis.from_url(
     decode_responses=True
 )
 
-CHANNEL = "stc_decisions"
+CHANNEL = "stc:decisions"
 
 # --------------------------------------------------
 # Publish decision events

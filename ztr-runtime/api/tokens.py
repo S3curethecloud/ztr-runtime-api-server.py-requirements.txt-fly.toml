@@ -102,15 +102,17 @@ def issue_token(
         period = current_period()
         r.incr(tenant_usage_key(tenant_id, period, "policy_denied"))
 
-        publish_decision({
+        event = {
+            "timestamp": int(time.time()),
             "tenant": tenant_id,
             "principal": req.principal,
             "intent": req.intent,
             "decision": "deny",
-            "policy_revision": policy_input["policy_revision"],
-            "risk_score": req.context.get("risk_score", 0),
-            "timestamp": now
-        })
+            "risk_score": (req.context or {}).get("risk_score"),
+            "policy_revision": policy_input["policy_revision"]
+        }
+
+        publish_decision(event)
 
         raise HTTPException(
             status_code=403,
@@ -144,12 +146,11 @@ def issue_token(
     pipe.execute()
 
     # ---------------------------------------------------------
-    # Active session counter (O(1) health metric)
+    # Active session counter
     # ---------------------------------------------------------
 
     r.incr("ztr:sessions:active")
 
-    # Increment the tokens_issued counter for the current period
     period = current_period()
     r.incr(tenant_usage_key(tenant_id, period, "tokens_issued"))
 
@@ -178,15 +179,21 @@ def issue_token(
         algorithm="HS256"
     )
 
-    publish_decision({
+    # ---------------------------------------------------------
+    # Publish Decision Telemetry
+    # ---------------------------------------------------------
+
+    event = {
+        "timestamp": int(time.time()),
         "tenant": tenant_id,
         "principal": req.principal,
         "intent": req.intent,
         "decision": "allow",
-        "policy_revision": policy_input["policy_revision"],
-        "risk_score": req.context.get("risk_score", 0),
-        "timestamp": now
-    })
+        "risk_score": (req.context or {}).get("risk_score"),
+        "policy_revision": policy_input["policy_revision"]
+    }
+
+    publish_decision(event)
 
     # ---------------------------------------------------------
     # Response
