@@ -129,29 +129,20 @@ def health():
     }
 
 
-# ---------------------------------------------------------
-# Runtime Integrity Endpoint
-# ---------------------------------------------------------
-
 @app.get("/v1/runtime/integrity")
 def runtime_integrity():
 
     checks = {}
 
-    # Redis check
     try:
         r.ping()
         checks["redis"] = True
     except Exception:
         checks["redis"] = False
 
-    # Policy revision
     policy_rev = POLICY_REVISION
-
-    # Runtime revision
     runtime_rev = os.getenv("RUNTIME_REVISION", "unknown")
 
-    # Audit chain integrity
     try:
         result = verify_chain(limit=1)
         audit_status = result.get("status")
@@ -300,12 +291,11 @@ def stream_decisions(
                     payload = entry.get("payload", {})
 
                     event = {
-                        "id": entry.get("event_hash"),
-                        "type": entry.get("event_type"),
-                        "time": entry.get("ts_ms"),
+                        "timestamp": int(entry.get("ts_ms") / 1000),
+                        "tenant_id": tenant_id,
                         "principal": payload.get("principal"),
                         "intent": payload.get("intent"),
-                        "result": payload.get("result"),
+                        "decision": payload.get("result"),
                         "policy_revision": payload.get("policy_revision"),
                     }
 

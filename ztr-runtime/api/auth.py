@@ -1,7 +1,7 @@
 import hashlib
 import redis
 import os
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 r = redis.from_url(
     os.environ["REDIS_URL"],
@@ -27,9 +27,17 @@ def derive_tenant_from_api_key(api_key: str) -> str:
     return tenant_id
 
 
-def require_tenant_api_key(x_stc_api_key: str = Header(None)) -> str:
+def require_tenant_api_key(
+    request: Request,
+    x_stc_api_key: str = Header(None)
+) -> str:
 
-    if not x_stc_api_key:
+    api_key = x_stc_api_key
+
+    if not api_key:
+        api_key = request.query_params.get("api_key")
+
+    if not api_key:
         raise HTTPException(status_code=401, detail="Missing API key")
 
-    return derive_tenant_from_api_key(x_stc_api_key)
+    return derive_tenant_from_api_key(api_key)
