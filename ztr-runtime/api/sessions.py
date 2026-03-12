@@ -102,7 +102,7 @@ def list_active_sessions(
 # ---------------------------------------------------------
 
 @sessions_router.post("/revoke")
-def revoke_session(
+async def revoke_session(
     body: dict = Body(...),
     tenant_id: str = Depends(require_tenant_api_key)
 ):
@@ -130,6 +130,12 @@ def revoke_session(
     pipe.srem(index_key, sid)
 
     pipe.execute()
+
+    # ---------------------------------------------------------
+    # Governance Metric Counter (Required Instruction)
+    # ---------------------------------------------------------
+
+    await redis.incr("metrics:sessions_revoked")
 
     # ---------------------------------------------------------
     # Active session counter update
