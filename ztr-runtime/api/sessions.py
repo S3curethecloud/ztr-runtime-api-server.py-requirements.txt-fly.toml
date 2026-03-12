@@ -81,6 +81,7 @@ def list_active_sessions(
 
         sessions.append({
             "session_id": sid,
+            "tenant_id": tenant_id,
             "principal": data.get("principal"),
             "intent": data.get("intent"),
             "scopes": json.loads(data.get("scopes", "[]")),

@@ -104,7 +104,7 @@ def issue_token(
 
         event = {
             "timestamp": int(time.time()),
-            "tenant": tenant_id,
+            "tenant_id": tenant_id,
             "principal": req.principal,
             "intent": req.intent,
             "decision": "deny",
@@ -185,7 +185,7 @@ def issue_token(
 
     event = {
         "timestamp": int(time.time()),
-        "tenant": tenant_id,
+        "tenant_id": tenant_id,
         "principal": req.principal,
         "intent": req.intent,
         "decision": "allow",
