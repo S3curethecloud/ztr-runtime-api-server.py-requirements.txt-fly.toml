@@ -34,9 +34,12 @@ from typing import Callable, Optional
 
 import httpx
 import redis
+import socket
 
 REDIS_URL = os.environ["REDIS_URL"]
 OPA_URL = os.getenv("OPA_URL", "http://localhost:8181")
+
+NODE_ID = os.getenv("NODE_ID", socket.gethostname())
 
 CHANNEL = "policy_updates"
 
@@ -135,7 +138,8 @@ def _handle_message(
         return
 
     print(
-        "[policy_subscriber] policy_update received: "
+        "[policy_subscriber][node="
+        f"{NODE_ID}] policy_update received: "
         f"tenant={tenant_id} version={policy_version}",
         flush=True,
     )
@@ -149,9 +153,14 @@ def _handle_message(
     # ---------------------------------------------------------
     client = redis.from_url(REDIS_URL, decode_responses=True)
 
-    client.set(
+    client.hset(
         f"ztr:tenant:{tenant_id}:policy_anchor",
-        policy_digest
+        mapping={
+            "policy_version": policy_version,
+            "policy_digest": policy_digest,
+            "updated_by_node": NODE_ID,
+            "updated_at": int(time.time())
+        }
     )
 
     # Optional runtime callback hook

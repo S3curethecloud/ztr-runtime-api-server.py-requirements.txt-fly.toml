@@ -46,6 +46,7 @@ from api.policy import router as policy_router
 from api.observability import router as observability_router
 from api.streaming import router as streaming_router
 from api.metrics import router as metrics_router
+from api.control_plane import router as control_router
 # from audit import audit_router
 # from revocations import revocations_router
 
@@ -70,6 +71,7 @@ app.include_router(policy_router)
 app.include_router(observability_router)
 app.include_router(streaming_router)
 app.include_router(metrics_router)
+app.include_router(control_router)
 # app.include_router(audit_router)
 # app.include_router(revocations_router)
 
