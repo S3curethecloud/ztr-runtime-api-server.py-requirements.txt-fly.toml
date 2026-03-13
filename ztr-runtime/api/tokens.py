@@ -36,6 +36,7 @@ import json
 import hashlib
 import datetime
 import jwt
+import socket
 
 
 tokens_router = APIRouter(prefix="/v1", tags=["tokens"])
@@ -46,6 +47,8 @@ r = redis.from_url(
     REDIS_URL,
     decode_responses=True
 )
+
+NODE_ID = os.getenv("NODE_ID", socket.gethostname())
 
 # ---------------------------------------------------------
 # JWT Configuration
@@ -214,6 +217,7 @@ async def issue_token(
         event_type="runtime.token_issued",
         service="ztr-runtime",
         payload={
+            "node_id": NODE_ID,
             "principal": req.principal,
             "intent": req.intent,
             "result": "allow",
