@@ -49,6 +49,7 @@ from api.observability import router as observability_router
 from api.streaming import router as streaming_router
 from api.metrics import router as metrics_router
 from api.control_plane import router as control_router
+from api.topology import router as topology_router
 # from audit import audit_router
 # from revocations import revocations_router
 
@@ -74,6 +75,7 @@ app.include_router(observability_router)
 app.include_router(streaming_router)
 app.include_router(metrics_router)
 app.include_router(control_router)
+app.include_router(topology_router)
 # app.include_router(audit_router)
 # app.include_router(revocations_router)
 
@@ -102,12 +104,11 @@ JWT_VERSION        = "1.0"
 POLICY_REVISION    = os.environ["POLICY_REVISION"]
 JWT_SECRET_VERSION = os.environ["JWT_SECRET_VERSION"]
 
+r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+
 NODE_ID = get_node_id()
 
-r = redis.from_url(
-    os.environ["REDIS_URL"],
-    decode_responses=True,
-)
+r.sadd("runtime:nodes", NODE_ID)
 
 def sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
