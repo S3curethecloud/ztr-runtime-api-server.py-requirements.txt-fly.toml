@@ -211,7 +211,7 @@ async def issue_token(
 
     emit_event(
         tenant_id=tenant_id,
-        event_type="runtime.token_introspected",
+        event_type="runtime.token_issued",
         service="ztr-runtime",
         payload={
             "principal": req.principal,
