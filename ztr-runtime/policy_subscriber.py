@@ -125,17 +125,27 @@ def _handle_message(
         )
         return
 
-    tenant_id = str(data.get("tenant_id", "")).strip().lower()
-    policy_version = str(data.get("policy_version", "")).strip()
-    policy_digest = str(data.get("policy_digest", "")).strip()
+    tenant_id = data.get("tenant_id")
 
-    if not tenant_id or not policy_version or not policy_digest:
+    policy_version = (
+        data.get("policy_version")
+        or data.get("policy_revision")
+    )
+
+    policy_bundle = data.get("policy_bundle")
+
+    if not tenant_id or not policy_version:
         print(
-            "[policy_subscriber][WARN] incomplete policy_updates "
-            f"message: {data}",
-            flush=True,
+            "[policy_subscriber][WARN] incomplete policy_updates message:",
+            data,
+            flush=True
         )
         return
+
+    tenant_id = str(tenant_id).strip().lower()
+    policy_version = str(policy_version).strip()
+
+    policy_digest = str(data.get("policy_digest") or "").strip()
 
     print(
         "[policy_subscriber][node="
@@ -144,13 +154,9 @@ def _handle_message(
         flush=True,
     )
 
-    # Flush stale cache first, then store fresh pointer
     flush_cached_policy(tenant_id)
     set_cached_policy(tenant_id, policy_version, policy_digest)
 
-    # ---------------------------------------------------------
-    # Persist governance anchor digest for runtime verification
-    # ---------------------------------------------------------
     client = redis.from_url(REDIS_URL, decode_responses=True)
 
     client.hset(
@@ -163,7 +169,6 @@ def _handle_message(
         }
     )
 
-    # Optional runtime callback hook
     if on_update is not None:
         try:
             on_update(tenant_id, policy_version, policy_digest)
@@ -174,7 +179,6 @@ def _handle_message(
                 flush=True,
             )
 
-    # Best-effort OPA reachability check / wake-up probe
     _probe_opa(tenant_id)
 
 

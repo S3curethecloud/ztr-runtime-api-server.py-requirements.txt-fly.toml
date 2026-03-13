@@ -18,9 +18,10 @@ r = redis.from_url(
 async def publish_policy_update(payload: dict):
 
     message = {
-        "timestamp": int(time.time()),
-        "policy_revision": payload.get("policy_revision"),
-        "policy_bundle": payload.get("bundle")
+        "tenant_id": payload.get("tenant_id"),
+        "policy_version": payload.get("policy_revision"),
+        "policy_bundle": payload.get("bundle"),
+        "timestamp": int(time.time())
     }
 
     r.publish("policy_updates", json.dumps(message))
