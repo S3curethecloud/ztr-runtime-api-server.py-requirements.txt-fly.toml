@@ -35,6 +35,7 @@ from runtime_identity import get_node_id
 
 from api.models import TokenIssueRequest, IntrospectionRequest, TenantRevokeRequest
 from api.auth import require_tenant_api_key
+from api.intelligence import intelligence_router
 
 from audit_chain import emit_event, verify_chain, list_index, get_entry
 from opa_bridge import evaluate_introspect_policy
@@ -78,6 +79,7 @@ app.include_router(metrics_router)
 app.include_router(control_router)
 app.include_router(topology_router)
 app.include_router(routing_router)
+app.include_router(intelligence_router)
 # app.include_router(audit_router)
 # app.include_router(revocations_router)
 

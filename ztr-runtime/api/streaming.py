@@ -1,9 +1,12 @@
 import json
 import asyncio
 import redis
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 import os
+import logging
+
+from api.auth import require_tenant_api_key
 
 router = APIRouter()
 
@@ -16,13 +19,60 @@ r = redis.from_url(
 
 CHANNEL = "stc:decisions"
 
+logger = logging.getLogger("stc.runtime")
+
+
 # --------------------------------------------------
 # Publish decision events
 # --------------------------------------------------
 
 def publish_decision(event: dict):
 
+    # --------------------------------------------------
+    # Publish real-time event (SSE stream)
+    # --------------------------------------------------
+
     r.publish(CHANNEL, json.dumps(event))
+
+    # --------------------------------------------------
+    # Persist decision for intelligence analytics
+    # --------------------------------------------------
+
+    try:
+
+        ts = int(event.get("timestamp") or 0)
+
+        tenant = event.get("tenant_id", "unknown")
+        principal = event.get("principal", "unknown")
+        intent = event.get("intent", "unknown")
+        decision = event.get("decision", "unknown")
+
+        risk_score = int(event.get("risk_score") or 0)
+
+        decision_key = f"metrics:decision:{ts}:{tenant}:{principal}:{intent}:{decision}"
+
+        r.hset(
+            decision_key,
+            mapping={
+                "tenant_id": tenant,
+                "principal": principal,
+                "intent": intent,
+                "decision": decision,
+                "risk_score": risk_score,
+                "policy_revision": event.get("policy_revision")
+            }
+        )
+
+        # retain decision history for 24 hours
+        r.expire(decision_key, 86400)
+
+    except Exception as exc:
+
+        logger.error(
+            "decision persistence failure",
+            extra={"error": str(exc), "event": event}
+        )
+
 
 # --------------------------------------------------
 # Stream events
@@ -49,12 +99,15 @@ async def event_generator():
 
             yield f"data: {message['data']}\n\n"
 
+
 # --------------------------------------------------
 # Endpoint
 # --------------------------------------------------
 
 @router.get("/decisions/stream")
-async def stream_decisions():
+async def stream_decisions(
+    tenant_id: str = Depends(require_tenant_api_key)
+):
 
     return StreamingResponse(
         event_generator(),

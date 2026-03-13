@@ -35,37 +35,49 @@ from audit_chain import emit_event
 from api.redis_keys import tenant_usage_key
 
 
-# ---------------------------------------------------------
-# Redis client
-# ---------------------------------------------------------
 _r = redis.from_url(
     os.environ["REDIS_URL"],
     decode_responses=True,
 )
 
-
-# ---------------------------------------------------------
-# Billing configuration
-# ---------------------------------------------------------
 TOKEN_PRICE_CENTS = int(os.getenv("TOKEN_PRICE_CENTS", "1"))
 
-
-# ---------------------------------------------------------
-# Admin secret
-# ---------------------------------------------------------
 ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
 POLICY_REVISION = os.getenv("POLICY_REVISION", "dev-1")
 
-
 admin_router = APIRouter(prefix="/v1/admin", tags=["admin"])
-
 
 MGMT_TENANT = "mgmt"
 
 
 # ---------------------------------------------------------
+# Governance Policy Anchor Helper
+# ---------------------------------------------------------
+
+def _write_policy_anchor(tenant_id: str, policy_version: str):
+
+    policy_digest = hashlib.sha256(policy_version.encode()).hexdigest()
+
+    anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
+
+    _r.set(anchor_key, policy_digest)
+
+    emit_event(
+        tenant_id=tenant_id,
+        event_type="runtime.policy_anchor_written",
+        service="ztr-admin",
+        payload={
+            "policy_version": policy_version,
+            "policy_digest": policy_digest,
+            "ts": int(time.time())
+        }
+    )
+
+
+# ---------------------------------------------------------
 # Auth dependency
 # ---------------------------------------------------------
+
 def _require_admin(x_stc_admin_secret: str = Header(None)) -> None:
 
     if not ADMIN_SECRET:
@@ -79,16 +91,10 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
-# ---------------------------------------------------------
-# Helper to get current billing period
-# ---------------------------------------------------------
 def current_period() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m")
 
 
-# ---------------------------------------------------------
-# Management ledger emit
-# ---------------------------------------------------------
 def _mgmt_emit(event_type: str, payload: dict) -> dict:
 
     return emit_event(
@@ -99,34 +105,6 @@ def _mgmt_emit(event_type: str, payload: dict) -> dict:
     )
 
 
-# ---------------------------------------------------------
-# Anchor helper
-# ---------------------------------------------------------
-def _tenant_anchor(
-    tenant_id: str,
-    mgmt_event_hash: str,
-    operation: str,
-    policy_version: str = "",
-    policy_digest: str = "",
-) -> None:
-
-    emit_event(
-        tenant_id=tenant_id,
-        event_type="runtime.mgmt_anchor_observed",
-        service="ztr-admin",
-        payload={
-            "mgmt_event_hash": mgmt_event_hash,
-            "policy_version": policy_version,
-            "policy_digest": policy_digest,
-            "operation": operation,
-            "effective_ts": int(time.time()),
-        },
-    )
-
-
-# ---------------------------------------------------------
-# Models
-# ---------------------------------------------------------
 class CreateTenantRequest(BaseModel):
     tenant_id: str
     label: str
@@ -141,6 +119,7 @@ class ProvisionTenantRequest(BaseModel):
 # ---------------------------------------------------------
 # POST /v1/admin/tenants
 # ---------------------------------------------------------
+
 @admin_router.post("/tenants", status_code=201)
 def create_tenant(
     req: CreateTenantRequest,
@@ -159,7 +138,6 @@ def create_tenant(
     now = int(time.time())
 
     policy_version = POLICY_REVISION
-    policy_digest = _sha256(policy_version)
 
     meta = {
         "tenant_id": tenant_id,
@@ -174,18 +152,14 @@ def create_tenant(
             "label": req.label,
             "created_at": now,
             "policy_version": policy_version,
-            "policy_digest": policy_digest,
         },
     )
 
     _r.set(meta_key, json.dumps(meta))
 
-    _tenant_anchor(
+    _write_policy_anchor(
         tenant_id,
-        mgmt_event["event_hash"],
-        "tenant_created",
-        policy_version,
-        policy_digest,
+        policy_version
     )
 
     return {
@@ -200,6 +174,7 @@ def create_tenant(
 # ---------------------------------------------------------
 # POST /v1/admin/provision
 # ---------------------------------------------------------
+
 @admin_router.post("/provision", status_code=201)
 def provision_tenant(
     req: ProvisionTenantRequest,
@@ -254,10 +229,9 @@ def provision_tenant(
 
     pipe.execute()
 
-    _tenant_anchor(
+    _write_policy_anchor(
         tenant_id,
-        mgmt_event["event_hash"],
-        "tenant_provisioned",
+        POLICY_REVISION
     )
 
     return {
@@ -266,303 +240,4 @@ def provision_tenant(
         "api_key": api_key,
         "key_hash": key_hash,
         "mgmt_event_hash": mgmt_event["event_hash"],
-    }
-
-
-# ---------------------------------------------------------
-# GET /v1/admin/tenants/{tenant_id}/usage
-# ---------------------------------------------------------
-@admin_router.get("/tenants/{tenant_id}/usage")
-def get_tenant_usage(
-    tenant_id: str,
-    x_stc_admin_secret: str = Header(None),
-):
-
-    _require_admin(x_stc_admin_secret)
-
-    period = current_period()
-
-    return {
-        "tenant_id": tenant_id,
-        "period": period,
-        "tokens_issued": int(_r.get(tenant_usage_key(tenant_id, period, "tokens_issued")) or 0),
-        "policy_denied": int(_r.get(tenant_usage_key(tenant_id, period, "policy_denied")) or 0),
-        "sessions_revoked": int(_r.get(tenant_usage_key(tenant_id, period, "sessions_revoked")) or 0),
-    }
-
-
-# ---------------------------------------------------------
-# GET /v1/admin/tenants/{tenant_id}/billing
-# ---------------------------------------------------------
-@admin_router.get("/tenants/{tenant_id}/billing")
-def get_tenant_billing(
-    tenant_id: str,
-    x_stc_admin_secret: str = Header(None),
-):
-
-    _require_admin(x_stc_admin_secret)
-
-    period = current_period()
-
-    tokens = int(_r.get(tenant_usage_key(tenant_id, period, "tokens_issued")) or 0)
-
-    amount = tokens * TOKEN_PRICE_CENTS
-
-    return {
-        "tenant_id": tenant_id,
-        "period": period,
-        "tokens_issued": tokens,
-        "unit_price_cents": TOKEN_PRICE_CENTS,
-        "amount_cents": amount,
-    }
-
-
-# ---------------------------------------------------------
-# GET /v1/admin/tenants/{tenant_id}/summary
-# ---------------------------------------------------------
-@admin_router.get("/tenants/{tenant_id}/summary")
-def get_tenant_summary(
-    tenant_id: str,
-    x_stc_admin_secret: str = Header(None),
-):
-
-    _require_admin(x_stc_admin_secret)
-
-    period = current_period()
-
-    policy = _r.hgetall(f"ztr:tenant:{tenant_id}:policy")
-
-    tokens = int(_r.get(tenant_usage_key(tenant_id, period, "tokens_issued")) or 0)
-
-    amount = tokens * TOKEN_PRICE_CENTS
-
-    return {
-        "tenant_id": tenant_id,
-        "policy_version": policy.get("version"),
-        "policy_digest": policy.get("digest"),
-        "tokens_issued": tokens,
-        "amount_cents": amount,
-    }
-
-
-# ---------------------------------------------------------
-# GET /v1/admin/tenants
-# ---------------------------------------------------------
-@admin_router.get("/tenants")
-def list_tenants(
-    x_stc_admin_secret: str = Header(None),
-):
-
-    _require_admin(x_stc_admin_secret)
-
-    tenants = []
-
-    for key in _r.scan_iter("ztr:tenant:*:meta"):
-
-        raw = _r.get(key)
-
-        if not raw:
-            continue
-
-        data = json.loads(raw)
-
-        tenant_id = data.get("tenant_id")
-
-        tenants.append({
-            "tenant_id": tenant_id,
-            "label": data.get("label"),
-            "created_at": data.get("created_at"),
-        })
-
-    return {
-        "count": len(tenants),
-        "tenants": tenants,
-    }
-
-
-# ---------------------------------------------------------
-# GET /v1/admin/tenants/{tenant_id}/sessions
-# ---------------------------------------------------------
-@admin_router.get("/tenants/{tenant_id}/sessions")
-def list_tenant_sessions(
-    tenant_id: str,
-    x_stc_admin_secret: str = Header(None),
-):
-
-    _require_admin(x_stc_admin_secret)
-
-    tenant_id = tenant_id.strip().lower()
-
-    index_key = f"ztr:tenant:{tenant_id}:session_index"
-
-    sids = _r.smembers(index_key)
-
-    sessions = []
-
-    for sid in sids:
-
-        key = f"ztr:tenant:{tenant_id}:session:{sid}"
-
-        data = _r.hgetall(key)
-
-        if not data:
-            continue
-
-        ttl = _r.ttl(key)
-
-        sessions.append({
-            "session_id": sid,
-            "principal": data.get("principal"),
-            "intent": data.get("intent"),
-            "scopes": data.get("scopes"),
-            "issued_at": data.get("issued_at"),
-            "ttl": ttl
-        })
-
-    return {
-        "tenant_id": tenant_id,
-        "active_sessions": len(sessions),
-        "sessions": sessions
-    }
-
-
-# ---------------------------------------------------------
-# GET /v1/admin/runtime
-#
-# Runtime health snapshot for operators.
-#
-# Read-only. No state mutation.
-# ---------------------------------------------------------
-@admin_router.get("/runtime")
-def runtime_health(
-    x_stc_admin_secret: str = Header(None),
-):
-
-    _require_admin(x_stc_admin_secret)
-
-    redis_status = "ok"
-
-    try:
-        _r.ping()
-    except Exception:
-        redis_status = "error"
-
-    tenant_count = 0
-    for _ in _r.scan_iter("ztr:tenant:*:meta"):
-        tenant_count += 1
-
-    active_sessions = 0
-
-    for key in _r.scan_iter("ztr:tenant:*:session_index"):
-        sids = _r.smembers(key)
-        active_sessions += len(sids)
-
-    return {
-        "status": "ok" if redis_status == "ok" else "degraded",
-        "redis": redis_status,
-        "policy_revision": POLICY_REVISION,
-        "tenant_count": tenant_count,
-        "active_sessions": active_sessions,
-        "period": current_period()
-    }
-
-
-# ---------------------------------------------------------
-# GET /v1/admin/metrics
-#
-# Platform-wide metrics aggregation across all tenants.
-# Read-only control-plane endpoint.
-# ---------------------------------------------------------
-@admin_router.get("/metrics")
-def platform_metrics(
-    x_stc_admin_secret: str = Header(None),
-):
-    _require_admin(x_stc_admin_secret)
-
-    period = current_period()
-
-    tokens_issued = 0
-    policy_denied = 0
-    sessions_revoked = 0
-
-    # Aggregate counters across all tenants
-    for key in _r.scan_iter(f"ztr:tenant:*:usage:{period}:tokens_issued"):
-        tokens_issued += int(_r.get(key) or 0)
-
-    for key in _r.scan_iter(f"ztr:tenant:*:usage:{period}:policy_denied"):
-        policy_denied += int(_r.get(key) or 0)
-
-    for key in _r.scan_iter(f"ztr:tenant:*:usage:{period}:sessions_revoked"):
-        sessions_revoked += int(_r.get(key) or 0)
-
-    # Active sessions across platform
-    active_sessions = 0
-    for key in _r.scan_iter("ztr:tenant:*:session_index"):
-        active_sessions += len(_r.smembers(key))
-
-    # Tenant count
-    tenant_count = 0
-    for _ in _r.scan_iter("ztr:tenant:*:meta"):
-        tenant_count += 1
-
-    return {
-        "period": period,
-        "metrics": {
-            "tokens_issued": tokens_issued,
-            "policy_denied": policy_denied,
-            "sessions_revoked": sessions_revoked,
-        },
-        "platform": {
-            "tenant_count": tenant_count,
-            "active_sessions": active_sessions
-        }
-    }
-
-# ---------------------------------------------------------
-# GET /v1/admin/decision-heatmap
-#
-# Control-plane visualization endpoint.
-# Aggregates tenant usage counters for the current period.
-# Safe: read-only, no runtime mutation.
-# ---------------------------------------------------------
-@admin_router.get("/decision-heatmap")
-def decision_heatmap(
-    x_stc_admin_secret: str = Header(None),
-):
-    _require_admin(x_stc_admin_secret)
-
-    period = current_period()
-
-    tenants = []
-
-    for key in _r.scan_iter("ztr:tenant:*:meta"):
-
-        try:
-            tenant_id = key.split(":")[2]
-
-            issued = int(
-                _r.get(tenant_usage_key(tenant_id, period, "tokens_issued")) or 0
-            )
-
-            denied = int(
-                _r.get(tenant_usage_key(tenant_id, period, "policy_denied")) or 0
-            )
-
-            revoked = int(
-                _r.get(tenant_usage_key(tenant_id, period, "sessions_revoked")) or 0
-            )
-
-            tenants.append({
-                "tenant_id": tenant_id,
-                "tokens_issued": issued,
-                "policy_denied": denied,
-                "sessions_revoked": revoked
-            })
-
-        except Exception:
-            continue
-
-    return {
-        "period": period,
-        "tenants": tenants
     }
