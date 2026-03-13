@@ -29,8 +29,5 @@ async def runtime_metrics():
         "policy_allowed": allowed,
         "policy_denied": denied,
         "sessions_revoked": revoked,
-        "decision_latency_ms": 18,
-        "opa_latency_ms": 6,
-        "redis_latency_ms": 2,
         "timestamp": int(time.time())
     }

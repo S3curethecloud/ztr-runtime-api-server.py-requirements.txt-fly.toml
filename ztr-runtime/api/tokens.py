@@ -28,6 +28,8 @@ from api.redis_keys import (
 from api.streaming import publish_decision
 from audit_chain import emit_event
 
+from runtime_identity import get_node_id
+
 import uuid
 import redis
 import os
@@ -36,7 +38,6 @@ import json
 import hashlib
 import datetime
 import jwt
-import socket
 
 
 tokens_router = APIRouter(prefix="/v1", tags=["tokens"])
@@ -48,7 +49,7 @@ r = redis.from_url(
     decode_responses=True
 )
 
-NODE_ID = os.getenv("NODE_ID", socket.gethostname())
+NODE_ID = get_node_id()
 
 # ---------------------------------------------------------
 # JWT Configuration
@@ -217,9 +218,9 @@ async def issue_token(
         event_type="runtime.token_issued",
         service="ztr-runtime",
         payload={
-            "node_id": NODE_ID,
             "principal": req.principal,
             "intent": req.intent,
+            "node_id": NODE_ID,
             "result": "allow",
             "policy_revision": policy_input["policy_revision"]
         }

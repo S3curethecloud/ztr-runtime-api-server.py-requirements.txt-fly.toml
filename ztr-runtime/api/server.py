@@ -31,6 +31,8 @@ import jwt
 import hashlib
 import json
 
+from runtime_identity import get_node_id
+
 from api.models import TokenIssueRequest, IntrospectionRequest, TenantRevokeRequest
 from api.auth import require_tenant_api_key
 
@@ -99,6 +101,8 @@ JWT_AUDIENCE       = "securethecloud"
 JWT_VERSION        = "1.0"
 POLICY_REVISION    = os.environ["POLICY_REVISION"]
 JWT_SECRET_VERSION = os.environ["JWT_SECRET_VERSION"]
+
+NODE_ID = get_node_id()
 
 r = redis.from_url(
     os.environ["REDIS_URL"],
