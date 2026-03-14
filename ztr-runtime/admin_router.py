@@ -157,6 +157,51 @@ def list_tenants(
 
 
 # ---------------------------------------------------------
+# GET /v1/admin/tenants/summary
+# Deterministic bulk summary endpoint (O(1) UI load)
+# ---------------------------------------------------------
+
+@admin_router.get("/tenants/summary")
+def list_tenant_summaries(
+    x_stc_admin_secret: str = Header(None),
+):
+
+    _require_admin(x_stc_admin_secret)
+
+    tenant_keys = _r.keys("ztr:tenant:*:meta")
+
+    tenants = []
+
+    for key in tenant_keys:
+
+        raw = _r.get(key)
+
+        if raw is None:
+            continue
+
+        meta = json.loads(raw)
+
+        tenant_id = meta.get("tenant_id")
+
+        policy_anchor = _r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
+
+        tenants.append({
+            "tenant_id": tenant_id,
+            "label": meta.get("label"),
+            "status": "active",
+            "policy_version": POLICY_REVISION,
+            "policy_anchor": policy_anchor,
+            "created_at": meta.get("created_at")
+        })
+
+    tenants.sort(key=lambda t: t["created_at"] or 0)
+
+    return {
+        "tenants": tenants
+    }
+
+
+# ---------------------------------------------------------
 # GET /v1/admin/tenants/{tenant_id}/summary
 # ---------------------------------------------------------
 
@@ -172,7 +217,7 @@ def tenant_summary(
 
     raw = _r.get(meta_key)
 
-    if not raw:
+    if raw is None:
         raise HTTPException(status_code=404, detail="tenant_not_found")
 
     meta = json.loads(raw)
