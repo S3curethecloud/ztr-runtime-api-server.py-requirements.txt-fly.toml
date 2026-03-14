@@ -117,6 +117,46 @@ class ProvisionTenantRequest(BaseModel):
 
 
 # ---------------------------------------------------------
+# GET /v1/admin/tenants
+# ---------------------------------------------------------
+
+@admin_router.get("/tenants")
+def list_tenants(
+    x_stc_admin_secret: str = Header(None),
+):
+
+    _require_admin(x_stc_admin_secret)
+
+    tenants = []
+
+    for key in _r.scan_iter("ztr:tenant:*:meta"):
+
+        try:
+
+            raw = _r.get(key)
+
+            if not raw:
+                continue
+
+            data = json.loads(raw)
+
+            tenants.append({
+                "tenant_id": data.get("tenant_id"),
+                "label": data.get("label"),
+                "created_at": data.get("created_at")
+            })
+
+        except Exception:
+            continue
+
+    tenants.sort(key=lambda t: t.get("created_at") or 0)
+
+    return {
+        "tenants": tenants
+    }
+
+
+# ---------------------------------------------------------
 # POST /v1/admin/tenants
 # ---------------------------------------------------------
 
