@@ -20,6 +20,7 @@ import httpx
 from fastapi import HTTPException
 from policy_subscriber import get_cached_policy
 from audit_chain import emit_event
+from riskdna import compute_risk_score
 
 r = redis.from_url(
     os.environ["REDIS_URL"],
@@ -70,16 +71,6 @@ def evaluate_introspect_policy(
 ) -> dict[str, Any]:
     """
     Re-evaluate the OPA policy at every introspection boundary.
-
-    Fail-closed table — every non-allow path returns allow=False:
-      OPA allow=true   → { allow: True,  reason: "opa_allow" }
-      OPA allow=false  → { allow: False, reason: "opa_deny" }
-      Timeout          → { allow: False, reason: "opa_unavailable" }
-      Connection error → { allow: False, reason: "opa_unavailable" }
-      Any exception    → { allow: False, reason: "opa_error" }
-      Unexpected shape → { allow: False, reason: "opa_bad_response" }
-
-    This function MUST NOT raise. It always returns a dict.
     """
 
     verify_projected_state(tenant_id)
@@ -91,6 +82,11 @@ def evaluate_introspect_policy(
         merged_context["cached_policy_version"] = cached_policy.get("version")
         merged_context["cached_policy_digest"] = cached_policy.get("digest")
 
+    risk = compute_risk_score(
+        tenant_id=tenant_id,
+        principal=principal
+    )
+
     input_payload = {
         "input": {
             "principal":       principal or "",
@@ -99,6 +95,7 @@ def evaluate_introspect_policy(
             "tenant_id":       tenant_id or "",
             "policy_revision": policy_revision or "",
             "context":         merged_context,
+            "risk":            risk,
             "ts":              int(time.time()),
         }
     }
@@ -161,12 +158,6 @@ def evaluate_introspect_policy(
 def evaluate_issue_policy(input_payload: dict) -> dict:
     """
     Evaluate token issuance policy through OPA.
-
-    Fail-closed rules:
-      OPA allow=true   → allow issuance
-      OPA allow=false  → deny issuance
-      OPA unavailable  → deny issuance
-      Any exception    → deny issuance
     """
 
     tenant_id = str(input_payload.get("tenant_id", "")).strip()
@@ -179,6 +170,15 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
     if cached_policy:
         enriched_input["cached_policy_version"] = cached_policy.get("version")
         enriched_input["cached_policy_digest"] = cached_policy.get("digest")
+
+    principal = enriched_input.get("principal")
+
+    risk = compute_risk_score(
+        tenant_id=tenant_id,
+        principal=principal
+    )
+
+    enriched_input["risk"] = risk
 
     url = OPA_URL.rstrip("/") + "/v1/data/ztr/issue/allow"
 
