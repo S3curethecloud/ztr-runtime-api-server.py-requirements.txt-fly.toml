@@ -20,7 +20,7 @@ import httpx
 from fastapi import HTTPException
 from policy_subscriber import get_cached_policy
 from audit_chain import emit_event
-from riskdna import compute_risk_score
+from api.risk_engine import compute_risk_score
 
 r = redis.from_url(
     os.environ["REDIS_URL"],
@@ -69,9 +69,6 @@ def evaluate_introspect_policy(
     policy_revision: str,
     context: dict[str, Any],
 ) -> dict[str, Any]:
-    """
-    Re-evaluate the OPA policy at every introspection boundary.
-    """
 
     verify_projected_state(tenant_id)
 
@@ -156,9 +153,6 @@ def evaluate_introspect_policy(
 
 
 def evaluate_issue_policy(input_payload: dict) -> dict:
-    """
-    Evaluate token issuance policy through OPA.
-    """
 
     tenant_id = str(input_payload.get("tenant_id", "")).strip()
 
