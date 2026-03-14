@@ -29,6 +29,7 @@ from api.streaming import publish_decision
 from audit_chain import emit_event
 
 from runtime_identity import get_node_id
+from api.blast_simulator import simulate_blast_radius, compute_riskdna
 
 import uuid
 import redis
@@ -81,6 +82,46 @@ async def issue_token(
 
     now = int(time.time())
 
+    # ----------------------------------------
+    # Predictive Authorization (Blast Radius)
+    # ----------------------------------------
+
+    graph = {
+        "refund:create": ["payment_db", "audit_ledger"],
+        "payment_db": ["ledger_backup"],
+        "audit_ledger": [],
+        "ledger_backup": []
+    }
+
+    nodes = simulate_blast_radius(req.principal, req.intent, graph)
+
+    risk_score = compute_riskdna(nodes)
+
+    # ----------------------------------------
+    # Step 5 — Store simulation telemetry
+    # ----------------------------------------
+
+    try:
+
+        ts = int(time.time())
+
+        redis_key = f"metrics:blast:{ts}"
+
+        r.set(
+            redis_key,
+            json.dumps({
+                "principal": req.principal,
+                "intent": req.intent,
+                "nodes": len(nodes),
+                "risk_score": risk_score
+            }),
+            ex=86400
+        )
+
+    except Exception:
+        # Telemetry must never break auth flow
+        pass
+
     # -------------------------------------------------
     # Phase 6 — OPA issuance enforcement
     # -------------------------------------------------
@@ -92,6 +133,7 @@ async def issue_token(
         "scopes": req.scopes,
         "ttl_seconds": req.ttl_seconds,
         "context": req.context or {},
+        "risk_score": risk_score,
         "ts": now,
         "policy_revision": "dev-1",
     }

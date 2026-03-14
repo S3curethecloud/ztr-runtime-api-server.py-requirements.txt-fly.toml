@@ -117,6 +117,30 @@ class ProvisionTenantRequest(BaseModel):
 
 
 # ---------------------------------------------------------
+# GET /v1/admin/metrics
+# Platform metrics for dashboard
+# ---------------------------------------------------------
+
+@admin_router.get("/metrics")
+def admin_metrics(
+    x_stc_admin_secret: str = Header(None),
+):
+
+    _require_admin(x_stc_admin_secret)
+
+    tenants = list(_r.scan_iter("ztr:tenant:*:meta"))
+    sessions = list(_r.scan_iter("ztr:*:session:*"))
+
+    return {
+        "tenant_count": len(tenants),
+        "active_sessions": len(sessions),
+        "tokens_issued": 0,
+        "policy_denied": 0,
+        "sessions_revoked": 0
+    }
+
+
+# ---------------------------------------------------------
 # GET /v1/admin/tenants
 # ---------------------------------------------------------
 
@@ -151,14 +175,11 @@ def list_tenants(
 
     tenants.sort(key=lambda t: t.get("created_at") or 0)
 
-    return {
-        "tenants": tenants
-    }
+    return {"tenants": tenants}
 
 
 # ---------------------------------------------------------
 # GET /v1/admin/tenants/summary
-# Deterministic bulk summary endpoint (O(1) UI load)
 # ---------------------------------------------------------
 
 @admin_router.get("/tenants/summary")
@@ -168,37 +189,50 @@ def list_tenant_summaries(
 
     _require_admin(x_stc_admin_secret)
 
-    tenant_keys = _r.keys("ztr:tenant:*:meta")
-
     tenants = []
 
-    for key in tenant_keys:
+    cursor = 0
 
-        raw = _r.get(key)
+    while True:
 
-        if raw is None:
-            continue
+        cursor, keys = _r.scan(cursor=cursor, match="ztr:tenant:*:meta")
 
-        meta = json.loads(raw)
+        for key in keys:
 
-        tenant_id = meta.get("tenant_id")
+            raw = _r.get(key)
 
-        policy_anchor = _r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
+            if raw is None:
+                continue
 
-        tenants.append({
-            "tenant_id": tenant_id,
-            "label": meta.get("label"),
-            "status": "active",
-            "policy_version": POLICY_REVISION,
-            "policy_anchor": policy_anchor,
-            "created_at": meta.get("created_at")
-        })
+            meta = json.loads(raw)
+
+            tenant_id = meta.get("tenant_id")
+
+            anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
+
+            policy_anchor = None
+
+            try:
+                if _r.type(anchor_key) == "string":
+                    policy_anchor = _r.get(anchor_key)
+            except Exception:
+                policy_anchor = None
+
+            tenants.append({
+                "tenant_id": tenant_id,
+                "label": meta.get("label"),
+                "status": "active",
+                "policy_version": POLICY_REVISION,
+                "policy_anchor": policy_anchor,
+                "created_at": meta.get("created_at")
+            })
+
+        if cursor == 0:
+            break
 
     tenants.sort(key=lambda t: t["created_at"] or 0)
 
-    return {
-        "tenants": tenants
-    }
+    return {"tenants": tenants}
 
 
 # ---------------------------------------------------------
@@ -222,7 +256,15 @@ def tenant_summary(
 
     meta = json.loads(raw)
 
-    policy_anchor = _r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
+    policy_anchor = None
+
+    anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
+
+    try:
+        if _r.exists(anchor_key):
+            policy_anchor = _r.get(anchor_key)
+    except Exception:
+        policy_anchor = None
 
     return {
         "tenant_id": tenant_id,
@@ -234,127 +276,78 @@ def tenant_summary(
 
 
 # ---------------------------------------------------------
-# POST /v1/admin/tenants
+# GET /v1/admin/tenants/{tenant_id}/sessions
 # ---------------------------------------------------------
 
-@admin_router.post("/tenants", status_code=201)
-def create_tenant(
-    req: CreateTenantRequest,
+@admin_router.get("/tenants/{tenant_id}/sessions")
+def tenant_sessions(
+    tenant_id: str,
     x_stc_admin_secret: str = Header(None),
 ):
 
     _require_admin(x_stc_admin_secret)
 
-    tenant_id = req.tenant_id.strip().lower()
+    sessions = []
 
-    meta_key = f"ztr:tenant:{tenant_id}:meta"
+    for key in _r.scan_iter(f"ztr:{tenant_id}:session:*"):
 
-    if _r.exists(meta_key):
-        raise HTTPException(status_code=409, detail="tenant_already_exists")
+        sid = key.split(":")[-1]
+        data = _r.hgetall(key)
 
-    now = int(time.time())
+        sessions.append({
+            "session_id": sid,
+            "principal": data.get("principal"),
+            "intent": data.get("intent"),
+            "issued": data.get("issued_at"),
+            "ttl": data.get("ttl")
+        })
 
-    policy_version = POLICY_REVISION
-
-    meta = {
-        "tenant_id": tenant_id,
-        "label": req.label,
-        "created_at": now,
-    }
-
-    mgmt_event = _mgmt_emit(
-        "admin.tenant_created",
-        {
-            "tenant_id": tenant_id,
-            "label": req.label,
-            "created_at": now,
-            "policy_version": policy_version,
-        },
-    )
-
-    _r.set(meta_key, json.dumps(meta))
-
-    _write_policy_anchor(
-        tenant_id,
-        policy_version
-    )
-
-    return {
-        "status": "created",
-        "tenant_id": tenant_id,
-        "label": req.label,
-        "policy_version": policy_version,
-        "mgmt_event_hash": mgmt_event["event_hash"],
-    }
+    return {"sessions": sessions}
 
 
 # ---------------------------------------------------------
-# POST /v1/admin/provision
+# GET /v1/admin/tenants/{tenant_id}/usage
+# Tenant usage metrics
 # ---------------------------------------------------------
 
-@admin_router.post("/provision", status_code=201)
-def provision_tenant(
-    req: ProvisionTenantRequest,
+@admin_router.get("/tenants/{tenant_id}/usage")
+def tenant_usage(
+    tenant_id: str,
     x_stc_admin_secret: str = Header(None),
 ):
 
     _require_admin(x_stc_admin_secret)
 
-    tenant_id = req.tenant_id.strip().lower()
+    tokens_issued = 0
+    policy_denied = 0
+    sessions_revoked = 0
 
-    meta_key = f"ztr:tenant:{tenant_id}:meta"
+    for key in _r.scan_iter("metrics:decision:*"):
 
-    if _r.exists(meta_key):
-        raise HTTPException(status_code=409, detail="tenant_already_exists")
+        data = _r.hgetall(key)
 
-    created_at = int(time.time())
+        if not data:
+            continue
 
-    meta = {
-        "tenant_id": tenant_id,
-        "label": req.label,
-        "created_at": created_at,
-    }
+        if data.get("tenant_id") != tenant_id:
+            continue
 
-    api_key = secrets.token_urlsafe(32)
+        tokens_issued += 1
 
-    key_hash = _sha256(api_key)
+        if data.get("decision") == "deny":
+            policy_denied += 1
 
-    key_record = {
-        "tenant_id": tenant_id,
-        "label": req.key_label,
-        "issued_at": created_at,
-        "key_hash": key_hash,
-    }
+    for key in _r.scan_iter(f"ztr:{tenant_id}:session:*"):
 
-    mgmt_event = _mgmt_emit(
-        "admin.tenant_provisioned",
-        {
-            "tenant_id": tenant_id,
-            "label": req.label,
-            "key_label": req.key_label,
-            "key_hash": key_hash,
-            "created_at": created_at,
-        },
-    )
+        data = _r.hgetall(key)
 
-    pipe = _r.pipeline()
-
-    pipe.set(meta_key, json.dumps(meta))
-    pipe.set(f"ztr:apikey:{key_hash}", tenant_id)
-    pipe.set(f"ztr:tenant:{tenant_id}:key:{key_hash}", json.dumps(key_record))
-    pipe.rpush(f"ztr:tenant:{tenant_id}:keys", key_hash)
-
-    pipe.execute()
-
-    _write_policy_anchor(
-        tenant_id,
-        POLICY_REVISION
-    )
+        if data.get("revoked") == "true":
+            sessions_revoked += 1
 
     return {
-        "status": "provisioned",
         "tenant_id": tenant_id,
-        "api_key": api_key,
-        "key_hash": key_hash,
-        "mgmt_event_hash": mgmt_event["event_hash"],
+        "tokens_issued": tokens_issued,
+        "policy_denied": policy_denied,
+        "sessions_revoked": sessions_revoked,
+        "period": current_period()
     }
