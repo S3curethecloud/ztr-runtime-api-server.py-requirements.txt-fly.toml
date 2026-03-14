@@ -157,6 +157,38 @@ def list_tenants(
 
 
 # ---------------------------------------------------------
+# GET /v1/admin/tenants/{tenant_id}/summary
+# ---------------------------------------------------------
+
+@admin_router.get("/tenants/{tenant_id}/summary")
+def tenant_summary(
+    tenant_id: str,
+    x_stc_admin_secret: str = Header(None),
+):
+
+    _require_admin(x_stc_admin_secret)
+
+    meta_key = f"ztr:tenant:{tenant_id}:meta"
+
+    raw = _r.get(meta_key)
+
+    if not raw:
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+
+    meta = json.loads(raw)
+
+    policy_anchor = _r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
+
+    return {
+        "tenant_id": tenant_id,
+        "status": "active",
+        "policy_version": POLICY_REVISION,
+        "policy_anchor": policy_anchor,
+        "created_at": meta.get("created_at")
+    }
+
+
+# ---------------------------------------------------------
 # POST /v1/admin/tenants
 # ---------------------------------------------------------
 
