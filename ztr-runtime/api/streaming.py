@@ -1,14 +1,14 @@
 import json
 import asyncio
 import redis
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Request, Query
 from fastapi.responses import StreamingResponse
 import os
 import logging
 
 from api.auth import require_tenant_api_key
 
-router = APIRouter()
+router = APIRouter(prefix="/v1")
 
 REDIS_URL = os.environ["REDIS_URL"]
 
@@ -75,18 +75,21 @@ def publish_decision(event: dict):
 
 
 # --------------------------------------------------
-# Stream events
+# Stream events (FIXED: disconnect-safe generator)
 # --------------------------------------------------
 
-async def event_generator():
+async def event_generator(request: Request):
 
     pubsub = r.pubsub()
-
     pubsub.subscribe(CHANNEL)
 
     loop = asyncio.get_event_loop()
 
     while True:
+
+        # 🔴 CRITICAL: stop when client disconnects
+        if await request.is_disconnected():
+            break
 
         message = await loop.run_in_executor(
             None,
@@ -96,20 +99,27 @@ async def event_generator():
         )
 
         if message and message["type"] == "message":
-
             yield f"data: {message['data']}\n\n"
 
 
 # --------------------------------------------------
-# Endpoint
+# Endpoint (FIXED: dual-mode auth)
 # --------------------------------------------------
 
 @router.get("/decisions/stream")
 async def stream_decisions(
-    tenant_id: str = Depends(require_tenant_api_key)
+    request: Request,
+    api_key: str = Query(None)
 ):
+    # 🔐 Support BOTH header auth (future) and query auth (EventSource)
+
+    if api_key:
+        tenant_id = require_tenant_api_key(api_key)
+    else:
+        # fallback to header-based auth
+        tenant_id = require_tenant_api_key(request)
 
     return StreamingResponse(
-        event_generator(),
+        event_generator(request),
         media_type="text/event-stream"
     )

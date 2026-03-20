@@ -53,8 +53,6 @@ from api.metrics import router as metrics_router
 from api.control_plane import router as control_router
 from api.topology import router as topology_router
 from api.router_endpoint import router as routing_router
-from api.control_plane_dashboard import router as dashboard_router
-# from audit import audit_router
 # from revocations import revocations_router
 
 
@@ -81,9 +79,7 @@ app.include_router(metrics_router)
 app.include_router(control_router)
 app.include_router(topology_router)
 app.include_router(routing_router)
-app.include_router(dashboard_router)
 app.include_router(intelligence_router)
-# app.include_router(audit_router)
 # app.include_router(revocations_router)
 
 # ---------------------------------------------------------
@@ -172,3 +168,21 @@ def runtime_integrity():
         "audit_chain": audit_status,
         "timestamp": int(time.time())
     }
+
+
+@app.get("/v1/audit/verify")
+def audit_verify(
+    tenant_id: str = Depends(require_tenant_api_key)
+):
+
+    try:
+        result = verify_chain(tenant_id=tenant_id)
+
+        return result
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail="audit_verification_failed"
+        )

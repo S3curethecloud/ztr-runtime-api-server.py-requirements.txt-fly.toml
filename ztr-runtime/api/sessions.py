@@ -131,16 +131,10 @@ async def revoke_session(
 
     pipe.execute()
 
-    # ---------------------------------------------------------
-    # Governance Metric Counter (Required Instruction)
-    # ---------------------------------------------------------
+    # Governance Metric Counter
+    r.incr("metrics:sessions_revoked")
 
-    await redis.incr("metrics:sessions_revoked")
-
-    # ---------------------------------------------------------
     # Active session counter update
-    # ---------------------------------------------------------
-
     r.decr("ztr:sessions:active")
 
     # Increment the sessions_revoked counter for the current period

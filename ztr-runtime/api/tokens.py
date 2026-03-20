@@ -119,7 +119,6 @@ async def issue_token(
         )
 
     except Exception:
-        # Telemetry must never break auth flow
         pass
 
     # -------------------------------------------------
@@ -194,18 +193,10 @@ async def issue_token(
 
     pipe.execute()
 
-    # ---------------------------------------------------------
-    # Active session counter
-    # ---------------------------------------------------------
-
     r.incr("ztr:sessions:active")
 
     period = current_period()
     r.incr(tenant_usage_key(tenant_id, period, "tokens_issued"))
-
-    # ---------------------------------------------------------
-    # JWT Signing
-    # ---------------------------------------------------------
 
     exp = now + req.ttl_seconds
 
@@ -228,16 +219,8 @@ async def issue_token(
         algorithm="HS256"
     )
 
-    # ---------------------------------------------------------
-    # Metrics Counters (Governance Instruction)
-    # ---------------------------------------------------------
-
     r.incr("metrics:tokens_issued")
     r.incr("metrics:policy_allowed")
-
-    # ---------------------------------------------------------
-    # Publish Decision Telemetry
-    # ---------------------------------------------------------
 
     event = {
         "timestamp": int(time.time()),
@@ -250,10 +233,6 @@ async def issue_token(
     }
 
     publish_decision(event)
-
-    # ---------------------------------------------------------
-    # Emit Audit Chain Event (for Blast Radius stream)
-    # ---------------------------------------------------------
 
     emit_event(
         tenant_id=tenant_id,
@@ -268,10 +247,6 @@ async def issue_token(
         }
     )
 
-    # ---------------------------------------------------------
-    # Response
-    # ---------------------------------------------------------
-
     return {
         "status": "issued",
         "tenant_id": tenant_id,
@@ -281,4 +256,56 @@ async def issue_token(
         "expires_in": req.ttl_seconds,
         "issued_at": now,
         "token": signed_token,
+    }
+
+
+# ---------------------------------------------------------
+# POST /v1/tokens/introspect
+# ---------------------------------------------------------
+
+@tokens_router.post("/tokens/introspect")
+async def introspect_token(
+    body: dict,
+    tenant_id: str = Depends(require_tenant_api_key),
+):
+
+    token = body.get("token")
+
+    if not token:
+        raise HTTPException(
+            status_code=400,
+            detail="token_required"
+        )
+
+    try:
+        payload = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+            audience=JWT_AUDIENCE,
+        )
+
+    except jwt.ExpiredSignatureError:
+        return {"active": False}
+
+    except jwt.InvalidTokenError:
+        return {"active": False}
+
+    sid = payload.get("sid")
+
+    if not sid:
+        return {"active": False}
+
+    session_key = tenant_session_key(tenant_id, sid)
+
+    if not r.exists(session_key):
+        return {"active": False}
+
+    return {
+        "active": True,
+        "tenant_id": tenant_id,
+        "principal": payload.get("sub"),
+        "intent": payload.get("intent"),
+        "scopes": payload.get("scopes"),
+        "expires_at": payload.get("exp"),
     }
