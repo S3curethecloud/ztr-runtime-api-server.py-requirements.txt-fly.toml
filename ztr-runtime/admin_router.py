@@ -32,7 +32,11 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from audit_chain import emit_event
-from api.redis_keys import tenant_usage_key
+from api.redis_keys import (
+    tenant_session_key,
+    tenant_session_index_key,
+    tenant_usage_key,
+)
 
 
 _r = redis.from_url(
@@ -49,13 +53,12 @@ admin_router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
 MGMT_TENANT = "mgmt"
 
-
 # ---------------------------------------------------------
 # Governance Policy Anchor Helper
 # ---------------------------------------------------------
 
-def _write_policy_anchor(tenant_id: str, policy_version: str):
 
+def _write_policy_anchor(tenant_id: str, policy_version: str):
     policy_digest = hashlib.sha256(policy_version.encode()).hexdigest()
 
     anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
@@ -78,8 +81,8 @@ def _write_policy_anchor(tenant_id: str, policy_version: str):
 # Auth dependency
 # ---------------------------------------------------------
 
-def _require_admin(x_stc_admin_secret: str = Header(None)) -> None:
 
+def _require_admin(x_stc_admin_secret: str = Header(None)) -> None:
     if not ADMIN_SECRET:
         raise HTTPException(status_code=503, detail="admin_not_configured")
 
@@ -96,7 +99,6 @@ def current_period() -> str:
 
 
 def _mgmt_emit(event_type: str, payload: dict) -> dict:
-
     return emit_event(
         tenant_id=MGMT_TENANT,
         event_type=event_type,
@@ -121,11 +123,11 @@ class ProvisionTenantRequest(BaseModel):
 # Platform metrics for dashboard
 # ---------------------------------------------------------
 
+
 @admin_router.get("/metrics")
 def admin_metrics(
     x_stc_admin_secret: str = Header(None),
 ):
-
     _require_admin(x_stc_admin_secret)
 
     tenants = list(_r.scan_iter("ztr:tenant:*:meta"))
@@ -144,19 +146,17 @@ def admin_metrics(
 # GET /v1/admin/tenants
 # ---------------------------------------------------------
 
+
 @admin_router.get("/tenants")
 def list_tenants(
     x_stc_admin_secret: str = Header(None),
 ):
-
     _require_admin(x_stc_admin_secret)
 
     tenants = []
 
     for key in _r.scan_iter("ztr:tenant:*:meta"):
-
         try:
-
             raw = _r.get(key)
 
             if not raw:
@@ -182,11 +182,11 @@ def list_tenants(
 # GET /v1/admin/tenants/summary
 # ---------------------------------------------------------
 
+
 @admin_router.get("/tenants/summary")
 def list_tenant_summaries(
     x_stc_admin_secret: str = Header(None),
 ):
-
     _require_admin(x_stc_admin_secret)
 
     tenants = []
@@ -194,11 +194,9 @@ def list_tenant_summaries(
     cursor = 0
 
     while True:
-
         cursor, keys = _r.scan(cursor=cursor, match="ztr:tenant:*:meta")
 
         for key in keys:
-
             raw = _r.get(key)
 
             if raw is None:
@@ -239,12 +237,12 @@ def list_tenant_summaries(
 # GET /v1/admin/tenants/{tenant_id}/summary
 # ---------------------------------------------------------
 
+
 @admin_router.get("/tenants/{tenant_id}/summary")
 def tenant_summary(
     tenant_id: str,
     x_stc_admin_secret: str = Header(None),
 ):
-
     _require_admin(x_stc_admin_secret)
 
     meta_key = f"ztr:tenant:{tenant_id}:meta"
@@ -279,18 +277,17 @@ def tenant_summary(
 # GET /v1/admin/tenants/{tenant_id}/sessions
 # ---------------------------------------------------------
 
+
 @admin_router.get("/tenants/{tenant_id}/sessions")
 def tenant_sessions(
     tenant_id: str,
     x_stc_admin_secret: str = Header(None),
 ):
-
     _require_admin(x_stc_admin_secret)
 
     sessions = []
 
-    for key in _r.scan_iter(f"ztr:{tenant_id}:session:*"):
-
+    for key in _r.scan_iter(f"ztr:tenant:{tenant_id}:session:*"):
         sid = key.split(":")[-1]
         data = _r.hgetall(key)
 
@@ -310,12 +307,12 @@ def tenant_sessions(
 # Tenant usage metrics
 # ---------------------------------------------------------
 
+
 @admin_router.get("/tenants/{tenant_id}/usage")
 def tenant_usage(
     tenant_id: str,
     x_stc_admin_secret: str = Header(None),
 ):
-
     _require_admin(x_stc_admin_secret)
 
     tokens_issued = 0
@@ -323,7 +320,6 @@ def tenant_usage(
     sessions_revoked = 0
 
     for key in _r.scan_iter("metrics:decision:*"):
-
         data = _r.hgetall(key)
 
         if not data:
@@ -337,8 +333,7 @@ def tenant_usage(
         if data.get("decision") == "deny":
             policy_denied += 1
 
-    for key in _r.scan_iter(f"ztr:{tenant_id}:session:*"):
-
+    for key in _r.scan_iter(f"ztr:tenant:{tenant_id}:session:*"):
         data = _r.hgetall(key)
 
         if data.get("revoked") == "true":
@@ -350,4 +345,79 @@ def tenant_usage(
         "policy_denied": policy_denied,
         "sessions_revoked": sessions_revoked,
         "period": current_period()
+    }
+
+
+# ---------------------------------------------------------
+# POST /v1/admin/policy/publish
+# Control Plane: Publish policy + revoke all sessions
+# ---------------------------------------------------------
+
+
+@admin_router.post("/policy/publish")
+def publish_policy(
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    total_revoked = 0
+
+    # ✅ Iterate all tenants
+    for key in _r.scan_iter("ztr:tenant:*:meta"):
+        tenant_id = None
+
+        try:
+            raw = _r.get(key)
+            if not raw:
+                continue
+
+            meta = json.loads(raw)
+            tenant_id = meta.get("tenant_id")
+
+            if not tenant_id:
+                continue
+
+            # ✅ Revoke ALL sessions for tenant
+            session_index = tenant_session_index_key(tenant_id)
+            session_ids = _r.smembers(session_index)
+
+            tenant_revoked = 0
+
+            for sid in session_ids:
+                session_key = tenant_session_key(tenant_id, sid)
+                _r.delete(session_key)
+                tenant_revoked += 1
+                total_revoked += 1
+
+            _r.delete(session_index)
+
+            # ✅ Write policy anchor (already part of your system)
+            _write_policy_anchor(tenant_id, POLICY_REVISION)
+
+            # ✅ Emit governance event (management chain)
+            _mgmt_emit(
+                "policy.publish",
+                {
+                    "tenant_id": tenant_id,
+                    "policy_version": POLICY_REVISION,
+                    "revoked_sessions": tenant_revoked,
+                    "ts": int(time.time())
+                }
+            )
+
+        except Exception as e:
+            _mgmt_emit(
+                "policy.publish.error",
+                {
+                    "tenant_id": tenant_id,
+                    "error": str(e),
+                    "ts": int(time.time())
+                }
+            )
+            continue
+
+    return {
+        "status": "policy_published",
+        "policy_version": POLICY_REVISION,
+        "total_revoked_sessions": total_revoked
     }

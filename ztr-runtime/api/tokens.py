@@ -70,6 +70,50 @@ def current_period() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m")
 
 
+def enforce_obligations(decision, request):
+    obligations = decision.get("obligations", [])
+
+    context = request.get("context", {})
+
+    # --- ROLE ---
+    if "ROLE_MATCHED" in obligations:
+        if request.get("principal") != "agent-demo":
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "ROLE_ENFORCEMENT_FAILED",
+                    "control": "ROLE_MATCHED",
+                    "layer": "runtime_enforcement"
+                }
+            )
+
+    # --- AMOUNT ---
+    if "AMOUNT_OK" in obligations:
+        amount = context.get("amount", 0)
+        if amount > 1000:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "AMOUNT_ENFORCEMENT_FAILED",
+                    "control": "AMOUNT_OK",
+                    "layer": "runtime_enforcement"
+                }
+            )
+
+    # --- RISK ---
+    if "RISK_OK" in obligations:
+        risk = context.get("risk_score", 0)
+        if risk > 50:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "RISK_ENFORCEMENT_FAILED",
+                    "control": "RISK_OK",
+                    "layer": "runtime_enforcement"
+                }
+            )
+
+
 # ---------------------------------------------------------
 # POST /v1/tokens/issue
 # ---------------------------------------------------------
@@ -125,14 +169,18 @@ async def issue_token(
     # Phase 6 — OPA issuance enforcement
     # -------------------------------------------------
 
+    context = req.context or {}
+
+    # 🔒 Inject computed risk into context (authoritative)
+    context["risk_score"] = risk_score
+
     policy_input = {
         "tenant_id": tenant_id,
         "principal": req.principal,
         "intent": req.intent,
         "scopes": req.scopes,
         "ttl_seconds": req.ttl_seconds,
-        "context": req.context or {},
-        "risk_score": risk_score,
+        "context": context,
         "ts": now,
         "policy_revision": "dev-1",
     }
@@ -156,7 +204,7 @@ async def issue_token(
             "principal": req.principal,
             "intent": req.intent,
             "decision": "deny",
-            "risk_score": (req.context or {}).get("risk_score"),
+            "risk_score": context.get("risk_score"),
             "policy_revision": policy_input["policy_revision"]
         }
 
@@ -166,6 +214,28 @@ async def issue_token(
             status_code=403,
             detail="policy_denied"
         )
+
+    effective_ttl = opa_result.get("ttl_seconds")
+
+    if not isinstance(effective_ttl, int) or effective_ttl <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail="invalid_policy_ttl"
+        )
+
+    request_context = dict(context)
+    request_amount = getattr(req, "amount", None)
+
+    if request_amount is not None:
+        request_context["amount"] = request_amount
+
+    request_data = {
+        "principal": req.principal,
+        "context": request_context
+    }
+
+    # 🔴 THIS IS THE NEW CONTROL LINE
+    enforce_obligations(opa_result, request_data)
 
     # ---------------------------------------------------------
     # Create session record
@@ -182,13 +252,13 @@ async def issue_token(
         "intent": req.intent,
         "scopes": json.dumps(req.scopes),
         "issued_at": now,
-        "ttl": req.ttl_seconds
+        "ttl": effective_ttl
     }
 
     pipe = r.pipeline()
 
     pipe.hset(session_key, mapping=session_record)
-    pipe.expire(session_key, req.ttl_seconds)
+    pipe.expire(session_key, effective_ttl)
     pipe.sadd(session_index, sid)
 
     pipe.execute()
@@ -198,7 +268,7 @@ async def issue_token(
     period = current_period()
     r.incr(tenant_usage_key(tenant_id, period, "tokens_issued"))
 
-    exp = now + req.ttl_seconds
+    exp = now + effective_ttl
 
     token_payload = {
         "iss": JWT_ISSUER,
@@ -228,7 +298,7 @@ async def issue_token(
         "principal": req.principal,
         "intent": req.intent,
         "decision": "allow",
-        "risk_score": (req.context or {}).get("risk_score"),
+        "risk_score": context.get("risk_score"),
         "policy_revision": policy_input["policy_revision"]
     }
 
@@ -253,7 +323,7 @@ async def issue_token(
         "session_id": sid,
         "principal": req.principal,
         "intent": req.intent,
-        "expires_in": req.ttl_seconds,
+        "expires_in": effective_ttl,
         "issued_at": now,
         "token": signed_token,
     }

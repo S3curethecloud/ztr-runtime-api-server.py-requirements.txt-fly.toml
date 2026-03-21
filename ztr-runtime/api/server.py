@@ -41,6 +41,7 @@ from api.intelligence import intelligence_router
 from audit_chain import emit_event, verify_chain, list_index, get_entry
 from opa_bridge import evaluate_introspect_policy
 from policy_subscriber import start_subscriber
+from policy_listener import start_listener_thread
 
 from admin_router import admin_router
 from admin.anomalies import router as anomalies_router
@@ -59,6 +60,7 @@ from api.router_endpoint import router as routing_router
 @asynccontextmanager
 async def lifespan(app):
     start_subscriber()
+    start_listener_thread()
     yield
 
 

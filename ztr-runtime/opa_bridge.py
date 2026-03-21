@@ -153,7 +153,6 @@ def evaluate_introspect_policy(
 
 
 def evaluate_issue_policy(input_payload: dict) -> dict:
-
     tenant_id = str(input_payload.get("tenant_id", "")).strip()
 
     verify_projected_state(tenant_id)
@@ -174,7 +173,8 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
 
     enriched_input["risk"] = risk
 
-    url = OPA_URL.rstrip("/") + "/v1/data/ztr/issue/allow"
+    # CRITICAL: issuance must call structured decision endpoint
+    url = OPA_URL.rstrip("/") + "/v1/data/ztr/issue/decision"
 
     try:
         resp = httpx.post(
@@ -185,10 +185,26 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
         resp.raise_for_status()
         body = resp.json()
 
-    except Exception:
+    except httpx.TimeoutException:
         return {
             "allow": False,
             "reason": "opa_unavailable",
+            "cached_policy": cached_policy or None,
+        }
+
+    except httpx.HTTPStatusError as exc:
+        return {
+            "allow": False,
+            "reason": "opa_unavailable",
+            "detail": str(exc),
+            "cached_policy": cached_policy or None,
+        }
+
+    except Exception as exc:
+        return {
+            "allow": False,
+            "reason": "opa_error",
+            "detail": str(exc),
             "cached_policy": cached_policy or None,
         }
 
@@ -196,13 +212,53 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
         return {
             "allow": False,
             "reason": "opa_bad_response",
+            "detail": f"unexpected body: {str(body)[:200]}",
             "cached_policy": cached_policy or None,
         }
 
-    allowed = bool(body["result"])
+    result = body["result"]
+
+    if not isinstance(result, dict):
+        return {
+            "allow": False,
+            "reason": "opa_bad_response",
+            "detail": f"unexpected result type: {type(result).__name__}",
+            "cached_policy": cached_policy or None,
+        }
+
+    allow = result.get("allow")
+    ttl_seconds = result.get("ttl_seconds")
+    obligations = result.get("obligations", [])
+
+    if not isinstance(allow, bool):
+        return {
+            "allow": False,
+            "reason": "opa_bad_response",
+            "detail": "missing_or_invalid_allow",
+            "cached_policy": cached_policy or None,
+        }
+
+    if not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
+        return {
+            "allow": False,
+            "reason": "opa_bad_response",
+            "detail": "missing_or_invalid_ttl_seconds",
+            "cached_policy": cached_policy or None,
+        }
+
+    if not isinstance(obligations, list):
+        return {
+            "allow": False,
+            "reason": "opa_bad_response",
+            "detail": "missing_or_invalid_obligations",
+            "cached_policy": cached_policy or None,
+        }
 
     return {
-        "allow": allowed,
-        "reason": "opa_allow" if allowed else "opa_deny",
+        "allow": allow,
+        "reason": "opa_allow" if allow else "opa_deny",
+        "ttl_seconds": ttl_seconds,
+        "obligations": obligations,
+        "policy_revision": result.get("policy_revision"),
         "cached_policy": cached_policy or None,
     }
