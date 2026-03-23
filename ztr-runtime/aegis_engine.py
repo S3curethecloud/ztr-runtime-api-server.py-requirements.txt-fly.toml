@@ -2,6 +2,7 @@ import requests
 import json
 import hashlib
 from datetime import datetime, UTC
+import time
 
 
 def get_latest_signal(tenant_id: str, principal: str) -> dict:
@@ -210,9 +211,11 @@ def process_event(event):
         key = f"ztr:aegis:{tenant_id}:{principal}"
 
         r.set(key, json.dumps({
-            "anomaly": False,
+            "anomaly": True,
             "velocity": 1,
-            "confidence": 0.95
+            "confidence": 0.95,
+            "risk_delta": 0,
+            "ts": int(time.time())
         }))
 
     except Exception:
@@ -223,7 +226,7 @@ def main():
     print("Aegis Engine Starting...")
 
     event = {
-        "principal": "agent_007",
+        "principal": "agent-demo",
         "action": "refund:create",
         "amount": 120,
         "risk_score": 42,

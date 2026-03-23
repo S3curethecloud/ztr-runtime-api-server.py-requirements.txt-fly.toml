@@ -201,7 +201,12 @@ async def issue_token(
     )
 
     if aegis_signal:
-        policy_input["context"]["aegis"] = aegis_signal
+        policy_input["context"]["aegis"] = {
+            "anomaly": bool(aegis_signal.get("anomaly", False)),
+            "velocity": int(aegis_signal.get("velocity", 0)),
+            "confidence": float(aegis_signal.get("confidence", 0.0)),
+            "risk_delta": int(aegis_signal.get("risk_delta", 0))
+        }
 
     opa_result = evaluate_issue_policy(policy_input)
 

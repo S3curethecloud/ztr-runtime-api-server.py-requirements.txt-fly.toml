@@ -34,9 +34,6 @@ OPA_TIMEOUT_S   = float(os.getenv("OPA_TIMEOUT_S", "2.0"))
 
 def verify_projected_state(tenant_id: str):
 
-    # --------------------------------------------------
-    # Load projected policy state from Redis
-    # --------------------------------------------------
     policy_ptr = r.hgetall(f"ztr:tenant:{tenant_id}:policy")
     redis_digest = policy_ptr.get("digest")
 
@@ -52,9 +49,6 @@ def verify_projected_state(tenant_id: str):
             detail="policy_state_missing"
         )
 
-    # --------------------------------------------------
-    # Load management anchor (control-plane truth)
-    # --------------------------------------------------
     anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
     anchor_digest = r.get(anchor_key)
 
@@ -70,9 +64,6 @@ def verify_projected_state(tenant_id: str):
             detail="policy_anchor_missing"
         )
 
-    # --------------------------------------------------
-    # Integrity check — CRITICAL
-    # --------------------------------------------------
     if redis_digest != anchor_digest:
 
         emit_event(
@@ -246,49 +237,13 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
             "cached_policy": cached_policy or None,
         }
 
-    result = body["result"]
-
-    if not isinstance(result, dict):
-        return {
-            "allow": False,
-            "reason": "opa_bad_response",
-            "detail": f"unexpected result type: {type(result).__name__}",
-            "cached_policy": cached_policy or None,
-        }
-
-    allow = result.get("allow")
-    ttl_seconds = result.get("ttl_seconds")
-    obligations = result.get("obligations", [])
-
-    if not isinstance(allow, bool):
-        return {
-            "allow": False,
-            "reason": "opa_bad_response",
-            "detail": "missing_or_invalid_allow",
-            "cached_policy": cached_policy or None,
-        }
-
-    if not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
-        return {
-            "allow": False,
-            "reason": "opa_bad_response",
-            "detail": "missing_or_invalid_ttl_seconds",
-            "cached_policy": cached_policy or None,
-        }
-
-    if not isinstance(obligations, list):
-        return {
-            "allow": False,
-            "reason": "opa_bad_response",
-            "detail": "missing_or_invalid_obligations",
-            "cached_policy": cached_policy or None,
-        }
+    result = body.get("result", {})
 
     return {
-        "allow": allow,
-        "reason": "opa_allow" if allow else "opa_deny",
-        "ttl_seconds": ttl_seconds,
-        "obligations": obligations,
+        "allow": result.get("allow", False),
+        "reason": "opa_allow" if result.get("allow") else "opa_deny",
+        "obligations": result.get("obligations", []),
+        "ttl_seconds": result.get("ttl_seconds"),
         "policy_revision": result.get("policy_revision"),
         "cached_policy": cached_policy or None,
     }
