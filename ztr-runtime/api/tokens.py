@@ -189,6 +189,20 @@ async def issue_token(
         json.dumps(policy_input, sort_keys=True).encode()
     ).hexdigest()
 
+    # --------------------------------------------------
+    # PHASE 8.1 — AEGIS SIGNAL INGESTION
+    # --------------------------------------------------
+
+    from aegis_engine import get_latest_signal
+
+    aegis_signal = get_latest_signal(
+        tenant_id=tenant_id,
+        principal=policy_input.get("principal")
+    )
+
+    if aegis_signal:
+        policy_input["context"]["aegis"] = aegis_signal
+
     opa_result = evaluate_issue_policy(policy_input)
 
     if not opa_result.get("allow"):
@@ -234,7 +248,6 @@ async def issue_token(
         "context": request_context
     }
 
-    # 🔴 THIS IS THE NEW CONTROL LINE
     enforce_obligations(opa_result, request_data)
 
     # ---------------------------------------------------------

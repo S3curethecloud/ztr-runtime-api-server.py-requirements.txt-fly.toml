@@ -4,6 +4,33 @@ import hashlib
 from datetime import datetime, UTC
 
 
+def get_latest_signal(tenant_id: str, principal: str) -> dict:
+    """
+    Phase 8.1 — deterministic signal fetch
+
+    Returns last known Aegis signal for principal.
+    Fail-safe: return None if not available.
+    """
+
+    try:
+        import redis, os
+
+        r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+
+        key = f"ztr:aegis:{tenant_id}:{principal}"
+
+        data = r.get(key)
+
+        if not data:
+            return None
+
+        import json
+        return json.loads(data)
+
+    except Exception:
+        return None
+
+
 def generate_riskdna(event):
     return {
         "principal": event.get("principal"),
@@ -166,6 +193,30 @@ def process_event(event):
             "status": "BLOCKED_BY_ENFORCEMENT",
             "engine": "aegis-core"
         })
+        return
+
+    # --------------------------------------------------
+    # OPTIONAL — STORE SIGNAL (RECOMMENDED)
+    # --------------------------------------------------
+
+    try:
+        import redis, os
+
+        r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+
+        tenant_id = policy_input.get("tenant_id")
+        principal = policy_input.get("principal")
+
+        key = f"ztr:aegis:{tenant_id}:{principal}"
+
+        r.set(key, json.dumps({
+            "anomaly": False,
+            "velocity": 1,
+            "confidence": 0.95
+        }))
+
+    except Exception:
+        pass
 
 
 def main():
