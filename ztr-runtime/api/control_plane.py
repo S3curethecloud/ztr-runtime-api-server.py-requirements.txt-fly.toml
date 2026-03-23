@@ -28,6 +28,22 @@ async def publish_policy_update(payload: dict):
             detail="missing_required_fields"
         )
 
+    # --------------------------------------------------
+    # REQUIRED FIX — POLICY DIGEST PROJECTION (MANDATORY)
+    # --------------------------------------------------
+    policy_revision = version
+
+    policy_key = f"ztr:tenant:{tenant_id}:policy"
+
+    policy_digest = hashlib.sha256(
+        policy_revision.encode()
+    ).hexdigest()
+
+    r.hset(policy_key, mapping={
+        "version": policy_revision,
+        "digest": policy_digest
+    })
+
     # 1️⃣ STATE + ENFORCEMENT (CRITICAL)
     result = update_policy_and_revoke(
         tenant_id,
@@ -58,14 +74,14 @@ async def publish_policy_update(payload: dict):
 def update_policy(tenant_id: str, policy_text: str, version: str):
     digest = hashlib.sha256(policy_text.encode()).hexdigest()
 
-    # write new policy
-    r.hset(f"tenant:{tenant_id}:policy", mapping={
+    # write new policy (FIXED — ztr namespace)
+    r.hset(f"ztr:tenant:{tenant_id}:policy", mapping={
         "version": version,
         "digest": digest
     })
 
-    # update anchor (authoritative)
-    r.set(f"tenant:{tenant_id}:policy_anchor", digest)
+    # update anchor (authoritative) (FIXED — ztr namespace)
+    r.set(f"ztr:tenant:{tenant_id}:policy_anchor", digest)
 
     return {
         "status": "policy_updated",

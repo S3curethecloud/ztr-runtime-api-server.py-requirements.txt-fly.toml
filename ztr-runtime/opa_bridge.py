@@ -34,29 +34,60 @@ OPA_TIMEOUT_S   = float(os.getenv("OPA_TIMEOUT_S", "2.0"))
 
 def verify_projected_state(tenant_id: str):
 
+    # --------------------------------------------------
+    # Load projected policy state from Redis
+    # --------------------------------------------------
     policy_ptr = r.hgetall(f"ztr:tenant:{tenant_id}:policy")
     redis_digest = policy_ptr.get("digest")
 
     if not redis_digest:
-        return
+        emit_event(
+            tenant_id=tenant_id,
+            event_type="runtime.policy_missing",
+            service="ztr-runtime",
+            payload={"tenant_id": tenant_id}
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="policy_state_missing"
+        )
 
-    ledger_anchor = r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
+    # --------------------------------------------------
+    # Load management anchor (control-plane truth)
+    # --------------------------------------------------
+    anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
+    anchor_digest = r.get(anchor_key)
 
-    if ledger_anchor and ledger_anchor != redis_digest:
+    if not anchor_digest:
+        emit_event(
+            tenant_id=tenant_id,
+            event_type="runtime.anchor_missing",
+            service="ztr-runtime",
+            payload={"tenant_id": tenant_id}
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="policy_anchor_missing"
+        )
+
+    # --------------------------------------------------
+    # Integrity check — CRITICAL
+    # --------------------------------------------------
+    if redis_digest != anchor_digest:
 
         emit_event(
             tenant_id=tenant_id,
-            event_type="runtime.tamper_suspected",
+            event_type="runtime.policy_tamper_detected",
             service="ztr-runtime",
             payload={
                 "redis_digest": redis_digest,
-                "anchor_digest": ledger_anchor
+                "anchor_digest": anchor_digest
             }
         )
 
         raise HTTPException(
             status_code=500,
-            detail="policy_state_tamper_detected"
+            detail="policy_state_tampered"
         )
 
 
@@ -173,7 +204,6 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
 
     enriched_input["risk"] = risk
 
-    # CRITICAL: issuance must call structured decision endpoint
     url = OPA_URL.rstrip("/") + "/v1/data/ztr/issue/decision"
 
     try:
