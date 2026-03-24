@@ -75,7 +75,6 @@ def enforce_obligations(decision, request):
 
     context = request.get("context", {})
 
-    # --- ROLE ---
     if "ROLE_MATCHED" in obligations:
         if request.get("principal") != "agent-demo":
             raise HTTPException(
@@ -87,7 +86,6 @@ def enforce_obligations(decision, request):
                 }
             )
 
-    # --- AMOUNT ---
     if "AMOUNT_OK" in obligations:
         amount = context.get("amount", 0)
         if amount > 1000:
@@ -100,7 +98,6 @@ def enforce_obligations(decision, request):
                 }
             )
 
-    # --- RISK ---
     if "RISK_OK" in obligations:
         risk = context.get("risk_score", 0)
         if risk > 50:
@@ -139,7 +136,16 @@ async def issue_token(
 
     nodes = simulate_blast_radius(req.principal, req.intent, graph)
 
-    risk_score = compute_riskdna(nodes)
+    riskdna = compute_riskdna(
+        principal=req.principal,
+        intent=req.intent,
+        nodes=nodes,
+        context=req.context or {},
+        recent_denials=0,
+        policy_drift=False
+    )
+
+    risk_score = riskdna["final_score"]
 
     # ----------------------------------------
     # Step 5 — Store simulation telemetry
@@ -148,16 +154,18 @@ async def issue_token(
     try:
 
         ts = int(time.time())
+        blast_id = str(uuid.uuid4())
 
-        redis_key = f"metrics:blast:{ts}"
+        redis_key = f"metrics:blast:{ts}:{tenant_id}:{req.principal}:{req.intent}:{blast_id}"
 
         r.set(
             redis_key,
             json.dumps({
+                "tenant_id": tenant_id,
                 "principal": req.principal,
                 "intent": req.intent,
-                "nodes": len(nodes),
-                "risk_score": risk_score
+                "risk_score": risk_score,
+                "riskdna": riskdna
             }),
             ex=86400
         )
@@ -171,7 +179,6 @@ async def issue_token(
 
     context = req.context or {}
 
-    # 🔒 Inject computed risk into context (authoritative)
     context["risk_score"] = risk_score
 
     policy_input = {
@@ -181,32 +188,38 @@ async def issue_token(
         "scopes": req.scopes,
         "ttl_seconds": req.ttl_seconds,
         "context": context,
+        "risk_score": risk_score,
+        "riskdna": riskdna,
         "ts": now,
         "policy_revision": "dev-1",
     }
 
+    # --------------------------------------------------
+    # PHASE 8.1 — AEGIS SIGNAL INGESTION (SAFE + CORRECT)
+    # --------------------------------------------------
+
+    try:
+        from aegis_engine import get_latest_signal
+
+        aegis_signal = get_latest_signal(
+            tenant_id=tenant_id,
+            principal=req.principal
+        )
+
+        if aegis_signal:
+            policy_input["context"]["aegis"] = {
+                "anomaly": bool(aegis_signal.get("anomaly", False)),
+                "velocity": int(aegis_signal.get("velocity", 0)),
+                "confidence": float(aegis_signal.get("confidence", 0.0)),
+                "risk_delta": int(aegis_signal.get("risk_delta", 0))
+            }
+
+    except Exception as e:
+        print(f"[AEGIS WARNING] {e}")
+
     input_hash = hashlib.sha256(
         json.dumps(policy_input, sort_keys=True).encode()
     ).hexdigest()
-
-    # --------------------------------------------------
-    # PHASE 8.1 — AEGIS SIGNAL INGESTION
-    # --------------------------------------------------
-
-    from aegis_engine import get_latest_signal
-
-    aegis_signal = get_latest_signal(
-        tenant_id=tenant_id,
-        principal=policy_input.get("principal")
-    )
-
-    if aegis_signal:
-        policy_input["context"]["aegis"] = {
-            "anomaly": bool(aegis_signal.get("anomaly", False)),
-            "velocity": int(aegis_signal.get("velocity", 0)),
-            "confidence": float(aegis_signal.get("confidence", 0.0)),
-            "risk_delta": int(aegis_signal.get("risk_delta", 0))
-        }
 
     opa_result = evaluate_issue_policy(policy_input)
 
@@ -254,10 +267,6 @@ async def issue_token(
     }
 
     enforce_obligations(opa_result, request_data)
-
-    # ---------------------------------------------------------
-    # Create session record
-    # ---------------------------------------------------------
 
     sid = str(uuid.uuid4())
 

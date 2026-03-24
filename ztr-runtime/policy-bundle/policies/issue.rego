@@ -6,21 +6,36 @@ default allow = false
 # PHASE 8.3 + 8.4 — AEGIS POLICY INTEGRATION + ENFORCEMENT
 # --------------------------------------------------
 
+# --------------------------------------------------
+# SAFE AEGIS HANDLING (REGO v1 COMPLIANT)
+# --------------------------------------------------
+
+aegis_present if {
+    input.context.aegis
+}
+
 aegis_anomaly if {
+    aegis_present
     input.context.aegis.anomaly == true
 }
 
 high_velocity if {
+    aegis_present
     input.context.aegis.velocity > 5
 }
 
-aegis_risk_adjusted := input.context.risk_score + input.context.aegis.risk_delta
-
 aegis_flagged if {
     aegis_anomaly
-} else if {
+}
+
+aegis_flagged if {
     high_velocity
 }
+
+aegis_risk_adjusted := adjusted if {
+    aegis_present
+    adjusted := input.context.risk_score + input.context.aegis.risk_delta
+} else := input.context.risk_score
 
 # 🔒 HARD BLOCK
 deny_aegis if {

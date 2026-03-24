@@ -16,6 +16,7 @@ import redis
 from typing import Any
 
 import httpx
+import json
 
 from fastapi import HTTPException
 from policy_subscriber import get_cached_policy
@@ -182,6 +183,10 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
     cached_policy = get_cached_policy(tenant_id) if tenant_id else None
 
     enriched_input = dict(input_payload)
+
+    if "context" not in enriched_input:
+        enriched_input["context"] = {}
+
     if cached_policy:
         enriched_input["cached_policy_version"] = cached_policy.get("version")
         enriched_input["cached_policy_digest"] = cached_policy.get("digest")
@@ -193,7 +198,10 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
         principal=principal
     )
 
-    enriched_input["risk"] = risk
+    enriched_input["context"] = dict(enriched_input.get("context", {}))
+    enriched_input["context"]["risk_score"] = risk
+
+    print("OPA INPUT:", json.dumps(enriched_input, indent=2))
 
     url = OPA_URL.rstrip("/") + "/v1/data/ztr/issue/decision"
 

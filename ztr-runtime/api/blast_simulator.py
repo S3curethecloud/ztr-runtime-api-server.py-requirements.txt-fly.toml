@@ -54,7 +54,14 @@ def simulate_blast_radius(principal: str, intent: str, graph: Dict[str, List[str
 # RiskDNA Scoring
 # ---------------------------------------------------------
 
-def compute_riskdna(nodes: Set[str]) -> int:
+def compute_riskdna(
+    principal: str,
+    intent: str,
+    nodes: Set[str],
+    context: dict,
+    recent_denials: int,
+    policy_drift: bool
+) -> dict:
     """
     Compute risk score from reachable nodes.
 
@@ -81,7 +88,24 @@ def compute_riskdna(nodes: Set[str]) -> int:
         if node in sensitive_nodes:
             score += 10
 
-    return score
+    # -----------------------------------------------------
+    # MINIMAL SAFE IMPLEMENTATION (REQUIRED)
+    # -----------------------------------------------------
+
+    identity_risk = 10 if principal else 0
+    intent_risk = 5 if intent else 0
+
+    score += identity_risk
+    score += intent_risk
+
+    return {
+        "identity_risk": identity_risk,
+        "intent_risk": intent_risk,
+        "topology_risk": len(nodes),
+        "behavior_risk": 0,
+        "policy_risk": 0,
+        "final_score": score
+    }
 
 
 # ---------------------------------------------------------
