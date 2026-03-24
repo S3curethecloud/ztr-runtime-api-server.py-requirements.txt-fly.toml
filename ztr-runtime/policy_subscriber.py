@@ -82,6 +82,7 @@ def _handle_message(
     raw = message.get("data", "")
     try:
         data = json.loads(raw)
+        print("SUBSCRIBER RECEIVED:", data)
     except Exception:
         print(
             f"[policy_subscriber][WARN] unparseable message: {raw}",

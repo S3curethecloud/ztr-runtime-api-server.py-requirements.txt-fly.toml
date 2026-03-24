@@ -1,8 +1,3 @@
-# =========================================================
-# tokens.py — Token Issuance + Session Creation
-# SecureTheCloud — Phase 6
-# =========================================================
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.models import TokenIssueRequest
@@ -136,6 +131,8 @@ async def issue_token(
     input_hash = hashlib.sha256(
         json.dumps(policy_input, sort_keys=True).encode()
     ).hexdigest()
+
+    print("OPA INPUT →", json.dumps(policy_input, indent=2))
 
     opa_result = evaluate_issue_policy(policy_input)
 
