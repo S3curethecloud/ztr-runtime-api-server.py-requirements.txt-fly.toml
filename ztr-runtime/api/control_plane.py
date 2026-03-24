@@ -22,6 +22,8 @@ async def publish_policy_update(payload: dict):
     policy_text = payload.get("bundle")
     version = payload.get("policy_revision")
 
+    print("🔥 PUBLISH HIT", tenant_id, version)
+
     if not tenant_id or not policy_text or not version:
         raise HTTPException(
             status_code=400,
@@ -36,13 +38,15 @@ async def publish_policy_update(payload: dict):
     policy_key = f"ztr:tenant:{tenant_id}:policy"
 
     policy_digest = hashlib.sha256(
-        policy_revision.encode()
+        policy_text.encode()
     ).hexdigest()
 
     r.hset(policy_key, mapping={
         "version": policy_revision,
         "digest": policy_digest
     })
+
+    print("🔥 REDIS WRITE EXECUTED", policy_key)
 
     # 1️⃣ STATE + ENFORCEMENT (CRITICAL)
     result = update_policy_and_revoke(
@@ -55,6 +59,7 @@ async def publish_policy_update(payload: dict):
     message = {
         "tenant_id": tenant_id,
         "policy_version": version,
+        "policy_digest": policy_digest,
         "timestamp": int(time.time())
     }
 
@@ -73,6 +78,8 @@ async def publish_policy_update(payload: dict):
 
 def update_policy(tenant_id: str, policy_text: str, version: str):
     digest = hashlib.sha256(policy_text.encode()).hexdigest()
+
+    print("🔥 UPDATE_POLICY WRITE", tenant_id)
 
     # write new policy (FIXED — ztr namespace)
     r.hset(f"ztr:tenant:{tenant_id}:policy", mapping={

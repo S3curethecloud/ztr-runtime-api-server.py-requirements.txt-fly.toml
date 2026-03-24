@@ -1,29 +1,3 @@
-# =========================================================
-# policy_subscriber.py — Policy Update Subscriber
-# SecureTheCloud — Phase 7.5-03
-#
-# Purpose:
-#   Subscribe to Redis policy_updates and keep the local
-#   runtime view of tenant policy state fresh.
-#
-# Behavior on policy update:
-#   1. Parse and validate pub/sub message
-#   2. Flush stale local cache for tenant
-#   3. Store fresh policy pointer in in-memory cache
-#   4. Invoke optional callback for runtime-specific refresh
-#   5. Best-effort OPA probe/log (not a forced reload)
-#
-# Design:
-#   - Runs as a daemon thread started from server.py lifespan
-#   - Fail-open on subscriber errors: runtime continues using
-#     last-known-good policy behavior
-#   - Reconnects with exponential backoff up to 30s
-#
-# Env vars:
-#   REDIS_URL  — canonical Redis connection
-#   OPA_URL    — OPA server address (default http://localhost:8181)
-# =========================================================
-
 from __future__ import annotations
 
 import json
@@ -55,13 +29,11 @@ _subscriber_lock = threading.Lock()
 
 
 def get_cached_policy(tenant_id: str) -> Optional[dict]:
-    """Return cached policy pointer for tenant, or None."""
     with _cache_lock:
         return _policy_cache.get(tenant_id)
 
 
 def set_cached_policy(tenant_id: str, version: str, digest: str) -> None:
-    """Set cached policy pointer for tenant."""
     with _cache_lock:
         _policy_cache[tenant_id] = {
             "version": version,
@@ -71,20 +43,15 @@ def set_cached_policy(tenant_id: str, version: str, digest: str) -> None:
 
 
 def flush_cached_policy(tenant_id: str) -> None:
-    """Remove cached policy pointer for tenant, if present."""
     with _cache_lock:
         _policy_cache.pop(tenant_id, None)
 
 
 def flush_all_cache() -> None:
-    """Clear all cached tenant policy pointers."""
     with _cache_lock:
         _policy_cache.clear()
 
 
-# ---------------------------------------------------------
-# OPA probe
-# ---------------------------------------------------------
 def _probe_opa(tenant_id: str) -> None:
     try:
         resp = httpx.get(
@@ -104,9 +71,6 @@ def _probe_opa(tenant_id: str) -> None:
         )
 
 
-# ---------------------------------------------------------
-# Message parsing / handling
-# ---------------------------------------------------------
 def _handle_message(
     message: dict,
     on_update: Optional[Callable[[str, str, str], None]] = None,
@@ -147,6 +111,10 @@ def _handle_message(
 
     policy_digest = str(data.get("policy_digest") or "").strip()
 
+    if not policy_digest:
+        print("[policy_subscriber][WARN] missing digest — skipping update")
+        return
+
     print(
         "[policy_subscriber][node="
         f"{NODE_ID}] policy_update received: "
@@ -159,14 +127,9 @@ def _handle_message(
 
     client = redis.from_url(REDIS_URL, decode_responses=True)
 
-    client.hset(
+    client.set(
         f"ztr:tenant:{tenant_id}:policy_anchor",
-        mapping={
-            "policy_version": policy_version,
-            "policy_digest": policy_digest,
-            "updated_by_node": NODE_ID,
-            "updated_at": int(time.time())
-        }
+        policy_digest
     )
 
     if on_update is not None:
@@ -182,9 +145,6 @@ def _handle_message(
     _probe_opa(tenant_id)
 
 
-# ---------------------------------------------------------
-# Subscriber loop
-# ---------------------------------------------------------
 def _subscriber_loop(
     on_update: Optional[Callable[[str, str, str], None]] = None,
 ) -> None:
@@ -224,9 +184,6 @@ def _subscriber_loop(
                 pass
 
 
-# ---------------------------------------------------------
-# Public API
-# ---------------------------------------------------------
 def start_subscriber(
     on_update: Optional[Callable[[str, str, str], None]] = None,
 ) -> threading.Thread:
