@@ -1,3 +1,7 @@
+# 🔒 MGF – GOVERNANCE AUTHORITY (ALL)
+# ZERO-TOLERANCE EXECUTION DIRECTIVE
+# NO DRIFT. NO GUESSING. NO HALLUCINATION.
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from api.models import TokenIssueRequest
@@ -162,10 +166,9 @@ async def issue_token(
         "intent": req.intent,
         "scopes": json.dumps(req.scopes),
         "issued_at": now,
-        "ttl": effective_ttl
+        "ttl": effective_ttl,
+        "risk": json.dumps(riskdna)
     }
-
-    session_record["risk"] = riskdna
 
     pipe = r.pipeline()
     pipe.hset(session_key, mapping=session_record)
