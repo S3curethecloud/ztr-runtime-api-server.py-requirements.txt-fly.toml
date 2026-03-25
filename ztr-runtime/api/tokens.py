@@ -117,6 +117,8 @@ async def issue_token(
 
     context = req.context or {}
     context["risk_score"] = risk_score
+    context["risk_tier"] = riskdna["risk_tier"]
+    context["risk_breakdown"] = riskdna
 
     policy_input = {
         "tenant_id": tenant_id,
@@ -162,6 +164,8 @@ async def issue_token(
         "issued_at": now,
         "ttl": effective_ttl
     }
+
+    session_record["risk"] = riskdna
 
     pipe = r.pipeline()
     pipe.hset(session_key, mapping=session_record)

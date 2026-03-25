@@ -92,6 +92,19 @@ high_risk if {
 }
 
 # --------------------------------------------------
+# 🔧 STEP 4 ADDITION (NON-DESTRUCTIVE)
+# --------------------------------------------------
+
+medium_risk if {
+    input.context.risk_score >= 30
+    input.context.risk_score < 60
+}
+
+high_risk if {
+    input.context.risk_score >= 60
+}
+
+# --------------------------------------------------
 # 🔒 ALLOW CONDITION (UPDATED)
 # --------------------------------------------------
 

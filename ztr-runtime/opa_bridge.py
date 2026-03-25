@@ -202,7 +202,7 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
     )
 
     enriched_input["context"] = dict(enriched_input.get("context", {}))
-    enriched_input["context"]["risk_score"] = risk
+    enriched_input["risk"] = risk
 
     print("OPA INPUT:", json.dumps(enriched_input, indent=2))
 

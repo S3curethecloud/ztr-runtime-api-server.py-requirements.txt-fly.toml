@@ -57,18 +57,11 @@ def simulate_blast_radius(principal: str, intent: str, graph: Dict[str, List[str
 def compute_riskdna(
     principal: str,
     intent: str,
-    nodes: Set[str],
+    nodes: set,
     context: dict,
     recent_denials: int,
     policy_drift: bool
 ) -> dict:
-    """
-    Compute risk score from reachable nodes.
-
-    Risk factors:
-    - number of impacted systems
-    - presence of sensitive resources
-    """
 
     sensitive_nodes = {
         "payment_db",
@@ -78,33 +71,76 @@ def compute_riskdna(
         "identity_store"
     }
 
-    score = 0
+    # -----------------------------------------------------
+    # TOPOLOGY RISK (blast radius)
+    # -----------------------------------------------------
+    topology_risk = len(nodes) * 2
 
-    # base score = blast radius size
-    score += len(nodes) * 2
-
-    # sensitive systems increase risk
     for node in nodes:
         if node in sensitive_nodes:
-            score += 10
+            topology_risk += 10
 
     # -----------------------------------------------------
-    # MINIMAL SAFE IMPLEMENTATION (REQUIRED)
+    # IDENTITY RISK
     # -----------------------------------------------------
-
     identity_risk = 10 if principal else 0
-    intent_risk = 5 if intent else 0
 
-    score += identity_risk
-    score += intent_risk
+    # -----------------------------------------------------
+    # BEHAVIOR RISK
+    # -----------------------------------------------------
+    behavior_risk = min(recent_denials * 5, 20)
+
+    # -----------------------------------------------------
+    # POLICY RISK
+    # -----------------------------------------------------
+    policy_risk = 15 if policy_drift else 0
+
+    # -----------------------------------------------------
+    # ENVIRONMENT RISK
+    # -----------------------------------------------------
+    environment_risk = 0
+
+    if context.get("after_hours"):
+        environment_risk += 20
+
+    if context.get("anomaly"):
+        environment_risk += 30
+
+    velocity = context.get("velocity", 0)
+    if velocity > 5:
+        environment_risk += 15
+
+    # -----------------------------------------------------
+    # FINAL SCORE
+    # -----------------------------------------------------
+    final_score = (
+        topology_risk +
+        identity_risk +
+        behavior_risk +
+        policy_risk +
+        environment_risk
+    )
+
+    # -----------------------------------------------------
+    # TIER CLASSIFICATION
+    # -----------------------------------------------------
+    if final_score <= 30:
+        tier = "LOW"
+    elif final_score <= 60:
+        tier = "MEDIUM"
+    elif final_score <= 90:
+        tier = "HIGH"
+    else:
+        tier = "CRITICAL"
 
     return {
         "identity_risk": identity_risk,
-        "intent_risk": intent_risk,
-        "topology_risk": len(nodes),
-        "behavior_risk": 0,
-        "policy_risk": 0,
-        "final_score": score
+        "behavior_risk": behavior_risk,
+        "topology_risk": topology_risk,
+        "policy_risk": policy_risk,
+        "environment_risk": environment_risk,
+        "final_score": final_score,
+        "risk_tier": tier
     }
 
 
