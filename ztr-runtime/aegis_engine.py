@@ -46,7 +46,7 @@ def build_policy_input(riskdna, event):
     signals = event.get("signals", {})
 
     policy_input = {
-        "tenant_id": "tenant-demo",
+        "tenant_id": event.get("tenant_id"),
         "principal": riskdna["principal"],
         "intent": riskdna["action"],
         "scopes": ["refund:create"],
@@ -196,10 +196,6 @@ def process_event(event):
         })
         return
 
-    # --------------------------------------------------
-    # OPTIONAL — STORE SIGNAL (RECOMMENDED)
-    # --------------------------------------------------
-
     try:
         import redis, os
 
@@ -227,6 +223,7 @@ def main():
 
     event = {
         "principal": "agent-demo",
+        "tenant_id": "tenant-launch",
         "action": "refund:create",
         "amount": 120,
         "risk_score": 42,

@@ -182,6 +182,9 @@ def evaluate_issue_policy(input_payload: dict) -> dict:
 
     cached_policy = get_cached_policy(tenant_id) if tenant_id else None
 
+    if not cached_policy and tenant_id:
+        cached_policy = r.hgetall(f"ztr:tenant:{tenant_id}:policy")
+
     enriched_input = dict(input_payload)
 
     if "context" not in enriched_input:
