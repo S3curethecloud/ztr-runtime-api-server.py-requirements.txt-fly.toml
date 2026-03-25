@@ -87,7 +87,7 @@ def list_active_sessions(
             "scopes": json.loads(data.get("scopes", "[]")),
             "issued_at": issued_at,
             "ttl": ttl,
-            "risk": data.get("risk")
+            "risk": json.loads(data.get("risk", "null"))
         })
 
     return {
