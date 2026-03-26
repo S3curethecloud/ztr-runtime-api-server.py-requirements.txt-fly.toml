@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 import redis
 import os
 import json
@@ -30,9 +30,6 @@ async def publish_policy_update(payload: dict):
             detail="missing_required_fields"
         )
 
-    # --------------------------------------------------
-    # REQUIRED FIX — POLICY DIGEST PROJECTION (MANDATORY)
-    # --------------------------------------------------
     policy_revision = version
 
     policy_key = f"ztr:tenant:{tenant_id}:policy"
@@ -48,14 +45,12 @@ async def publish_policy_update(payload: dict):
 
     print("🔥 REDIS WRITE EXECUTED", policy_key)
 
-    # 1️⃣ STATE + ENFORCEMENT (CRITICAL)
     result = update_policy_and_revoke(
         tenant_id,
         policy_text,
         version
     )
 
-    # 2️⃣ DISTRIBUTION EVENT
     message = {
         "tenant_id": tenant_id,
         "policy_version": version,
@@ -72,22 +67,16 @@ async def publish_policy_update(payload: dict):
     }
 
 
-# --------------------------------------------------
-# 🔒 PHASE 7.1 — POLICY VERSION CONTROL
-# --------------------------------------------------
-
 def update_policy(tenant_id: str, policy_text: str, version: str):
     digest = hashlib.sha256(policy_text.encode()).hexdigest()
 
     print("🔥 UPDATE_POLICY WRITE", tenant_id)
 
-    # write new policy (FIXED — ztr namespace)
     r.hset(f"ztr:tenant:{tenant_id}:policy", mapping={
         "version": version,
         "digest": digest
     })
 
-    # update anchor (authoritative) (FIXED — ztr namespace)
     r.set(f"ztr:tenant:{tenant_id}:policy_anchor", digest)
 
     return {
@@ -96,10 +85,6 @@ def update_policy(tenant_id: str, policy_text: str, version: str):
         "digest": digest
     }
 
-
-# --------------------------------------------------
-# 🔒 PHASE 7.1 — CAE TOKEN REVOCATION
-# --------------------------------------------------
 
 def revoke_all_sessions(tenant_id: str):
     pattern = f"ztr:{tenant_id}:session:*"
@@ -116,10 +101,6 @@ def revoke_all_sessions(tenant_id: str):
     }
 
 
-# --------------------------------------------------
-# 🔒 COMBINED OPERATION (CRITICAL)
-# --------------------------------------------------
-
 def update_policy_and_revoke(tenant_id: str, policy_text: str, version: str):
     result = update_policy(tenant_id, policy_text, version)
 
@@ -128,4 +109,47 @@ def update_policy_and_revoke(tenant_id: str, policy_text: str, version: str):
     return {
         "policy": result,
         "revocation": revoke
+    }
+
+
+# ---------------------------------------------------------
+# 🔒 CONTROL-PLANE POLICY READ (INTEGRITY ONLY — NO DRIFT)
+# ---------------------------------------------------------
+
+def _decode(value):
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+@router.get("/v1/control-plane/policy")
+def get_control_plane_policy(tenant_id: str = Query(...)):
+    policy_key = f"ztr:tenant:{tenant_id}:policy"
+    anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
+
+    policy_raw = r.hgetall(policy_key)
+    if not policy_raw:
+        raise HTTPException(status_code=404, detail=f"policy not found for tenant {tenant_id}")
+
+    policy = {
+        _decode(k): _decode(v)
+        for k, v in policy_raw.items()
+    }
+
+    digest = policy.get("digest") or ""
+    version = policy.get("version") or "--"
+    anchor = _decode(r.get(anchor_key)) or ""
+
+    integrity = "valid" if policy["digest"] == anchor else "mismatch"
+
+    return {
+        "tenant_id": tenant_id,
+        "policy": {
+            "version": version,
+            "digest": digest
+        },
+        "anchor": anchor,
+        "integrity": integrity
     }
