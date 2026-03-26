@@ -123,8 +123,7 @@ def _decode(value):
         return value.decode("utf-8")
     return str(value)
 
-
-@router.get("/v1/control-plane/policy")
+@router.get("/control-plane/policy")
 def get_control_plane_policy(tenant_id: str = Query(...)):
     policy_key = f"ztr:tenant:{tenant_id}:policy"
     anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
