@@ -141,7 +141,7 @@ def get_control_plane_policy(tenant_id: str = Query(...)):
     version = policy.get("version") or "--"
     anchor = _decode(r.get(anchor_key)) or ""
 
-    integrity = "valid" if policy["digest"] == anchor else "mismatch"
+    integrity = "valid" if digest == anchor else "mismatch"
 
     return {
         "tenant_id": tenant_id,
