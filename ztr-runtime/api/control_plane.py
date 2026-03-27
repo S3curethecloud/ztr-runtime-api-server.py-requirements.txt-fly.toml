@@ -52,6 +52,7 @@ async def publish_policy_update(payload: dict):
     )
 
     timestamp = int(time.time())
+
     event_id = f"{tenant_id}:{policy_revision}:{policy_digest[:16]}:{timestamp}"
 
     r.hset(
@@ -225,4 +226,30 @@ def get_control_plane_tenants():
     return {
         "count": len(tenants),
         "tenants": tenants
+    }
+
+
+# =========================================================
+# 🔧 CONTROL-PLANE TENANT SESSION REVOCATION
+# =========================================================
+
+@router.post("/control-plane/revoke-tenant")
+def revoke_tenant_sessions(payload: dict):
+    tenant_id = payload.get("tenant_id")
+
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="missing_tenant_id")
+
+    pattern = f"ztr:{tenant_id}:session:*"
+    keys = r.keys(pattern)
+
+    count = 0
+    for key in keys:
+        r.delete(key)
+        count += 1
+
+    return {
+        "tenant_id": tenant_id,
+        "revoked_sessions": count,
+        "status": "completed"
     }
