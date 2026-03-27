@@ -123,6 +123,7 @@ def _decode(value):
         return value.decode("utf-8")
     return str(value)
 
+
 @router.get("/control-plane/policy")
 def get_control_plane_policy(tenant_id: str = Query(...)):
     policy_key = f"ztr:tenant:{tenant_id}:policy"
@@ -141,7 +142,7 @@ def get_control_plane_policy(tenant_id: str = Query(...)):
     version = policy.get("version") or "--"
     anchor = _decode(r.get(anchor_key)) or ""
 
-    integrity = "valid" if digest == anchor else "mismatch"
+    integrity = "valid" if policy["digest"] == anchor else "mismatch"
 
     return {
         "tenant_id": tenant_id,
@@ -151,4 +152,48 @@ def get_control_plane_policy(tenant_id: str = Query(...)):
         },
         "anchor": anchor,
         "integrity": integrity
+    }
+
+
+# =========================================================
+# 🔧 PHASE 7.2 — STEP 1 (BACKEND)
+# ✅ NEW ENDPOINT (MANDATORY)
+# =========================================================
+
+@router.get("/control-plane/tenants")
+def get_control_plane_tenants():
+    pattern = "ztr:tenant:*:policy"
+    keys = r.keys(pattern)
+
+    tenants = []
+
+    for key in keys:
+        tenant_id = key.split(":")[2]
+
+        policy = r.hgetall(key)
+        anchor = r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
+
+        policy = {
+            _decode(k): _decode(v)
+            for k, v in policy.items()
+        }
+
+        digest = policy.get("digest")
+        version = policy.get("version")
+
+        integrity = "valid" if policy["digest"] == _decode(anchor) else "mismatch"
+
+        tenants.append({
+            "tenant_id": tenant_id,
+            "policy": {
+                "version": version,
+                "digest": digest
+            },
+            "anchor": _decode(anchor),
+            "integrity": integrity
+        })
+
+    return {
+        "count": len(tenants),
+        "tenants": tenants
     }
