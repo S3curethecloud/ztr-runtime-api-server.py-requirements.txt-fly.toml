@@ -51,12 +51,21 @@ async def publish_policy_update(payload: dict):
         version
     )
 
+    timestamp = int(time.time())
+    event_id = f"{tenant_id}:{version}:{policy_digest[:16]}:{timestamp}"
+
     message = {
         "tenant_id": tenant_id,
         "policy_version": version,
         "policy_digest": policy_digest,
-        "timestamp": int(time.time())
+        "timestamp": timestamp,
+        "event_id": event_id
     }
+
+    r.hset(f"ztr:tenant:{tenant_id}:propagation", mapping={
+        "last_updated_timestamp": timestamp,
+        "last_event_id": event_id
+    })
 
     r.publish("policy_updates", json.dumps(message))
 
@@ -157,7 +166,7 @@ def get_control_plane_policy(tenant_id: str = Query(...)):
 
 # =========================================================
 # 🔧 PHASE 7.2 — STEP 1 (BACKEND)
-# ✅ NEW ENDPOINT (MANDATORY)
+# ✅ UPDATED ENDPOINT (TENANT REGISTRY + PROPAGATION)
 # =========================================================
 
 @router.get("/control-plane/tenants")
@@ -170,18 +179,26 @@ def get_control_plane_tenants():
     for key in keys:
         tenant_id = key.split(":")[2]
 
-        policy = r.hgetall(key)
-        anchor = r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
+        policy_raw = r.hgetall(key)
+        anchor_raw = r.get(f"ztr:tenant:{tenant_id}:policy_anchor")
+        propagation_raw = r.hgetall(f"ztr:tenant:{tenant_id}:propagation")
 
         policy = {
             _decode(k): _decode(v)
-            for k, v in policy.items()
+            for k, v in policy_raw.items()
         }
 
-        digest = policy.get("digest")
-        version = policy.get("version")
+        propagation = {
+            _decode(k): _decode(v)
+            for k, v in propagation_raw.items()
+        }
 
-        integrity = "valid" if policy["digest"] == _decode(anchor) else "mismatch"
+        digest = policy.get("digest") or ""
+        version = policy.get("version") or "--"
+        anchor = _decode(anchor_raw) or ""
+
+        integrity = "valid" if digest == anchor else "mismatch"
+        propagation_status = "SYNCED" if integrity == "valid" else "STALE"
 
         tenants.append({
             "tenant_id": tenant_id,
@@ -189,9 +206,14 @@ def get_control_plane_tenants():
                 "version": version,
                 "digest": digest
             },
-            "anchor": _decode(anchor),
-            "integrity": integrity
+            "anchor": anchor,
+            "integrity": integrity,
+            "last_updated_timestamp": propagation.get("last_updated_timestamp"),
+            "last_event_id": propagation.get("last_event_id"),
+            "propagation_status": propagation_status
         })
+
+    tenants.sort(key=lambda t: t["tenant_id"])
 
     return {
         "count": len(tenants),
