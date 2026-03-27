@@ -52,7 +52,15 @@ async def publish_policy_update(payload: dict):
     )
 
     timestamp = int(time.time())
-    event_id = f"{tenant_id}:{version}:{policy_digest[:16]}:{timestamp}"
+    event_id = f"{tenant_id}:{policy_revision}:{policy_digest[:16]}:{timestamp}"
+
+    r.hset(
+        f"ztr:tenant:{tenant_id}:propagation",
+        mapping={
+            "last_updated_timestamp": timestamp,
+            "last_event_id": event_id
+        }
+    )
 
     message = {
         "tenant_id": tenant_id,
@@ -61,11 +69,6 @@ async def publish_policy_update(payload: dict):
         "timestamp": timestamp,
         "event_id": event_id
     }
-
-    r.hset(f"ztr:tenant:{tenant_id}:propagation", mapping={
-        "last_updated_timestamp": timestamp,
-        "last_event_id": event_id
-    })
 
     r.publish("policy_updates", json.dumps(message))
 
@@ -198,6 +201,10 @@ def get_control_plane_tenants():
         anchor = _decode(anchor_raw) or ""
 
         integrity = "valid" if digest == anchor else "mismatch"
+
+        last_updated = propagation.get("last_updated_timestamp")
+        last_event_id = propagation.get("last_event_id")
+
         propagation_status = "SYNCED" if integrity == "valid" else "STALE"
 
         tenants.append({
@@ -208,8 +215,8 @@ def get_control_plane_tenants():
             },
             "anchor": anchor,
             "integrity": integrity,
-            "last_updated_timestamp": propagation.get("last_updated_timestamp"),
-            "last_event_id": propagation.get("last_event_id"),
+            "last_updated_timestamp": last_updated,
+            "last_event_id": last_event_id,
             "propagation_status": propagation_status
         })
 
