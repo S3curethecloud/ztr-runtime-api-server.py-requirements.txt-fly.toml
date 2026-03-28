@@ -140,6 +140,47 @@ async def issue_token(
 
     print("OPA INPUT →", json.dumps(policy_input, indent=2))
 
+    # --------------------------------------------------
+    # 🔒 PHASE 7.4 — CONTROL PLANE ENFORCEMENT (NO DRIFT)
+    # --------------------------------------------------
+
+    policy_key = f"ztr:tenant:{tenant_id}:policy"
+    anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
+
+    policy = r.hgetall(policy_key)
+    anchor = r.get(anchor_key)
+
+    digest = policy.get("digest")
+
+    if digest != anchor:
+        emit_event({
+            "event_type": "control_plane_violation",
+            "tenant_id": tenant_id,
+            "digest": digest,
+            "anchor": anchor,
+            "timestamp": int(time.time()),
+            "node_id": NODE_ID
+        })
+
+        publish_decision({
+            "type": "AEGIS_SIGNAL",
+            "signal": "CONTROL_PLANE_MISMATCH",
+            "tenant_id": tenant_id,
+            "severity": "HIGH",
+            "action": "ISSUANCE_BLOCKED"
+        })
+
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "CONTROL_PLANE_MISMATCH",
+                "tenant_id": tenant_id,
+                "digest": digest,
+                "anchor": anchor,
+                "layer": "control_plane_enforcement"
+            }
+        )
+
     opa_result = evaluate_issue_policy(policy_input)
 
     if not opa_result.get("allow"):

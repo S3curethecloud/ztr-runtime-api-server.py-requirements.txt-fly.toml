@@ -253,3 +253,53 @@ def revoke_tenant_sessions(payload: dict):
         "revoked_sessions": count,
         "status": "completed"
     }
+
+
+# =========================================================
+# 🔧 CONTROL-PLANE FIX TENANT (ANCHOR REALIGNMENT)
+# =========================================================
+
+@router.post("/control-plane/fix-tenant")
+def fix_tenant(payload: dict):
+    tenant_id = payload.get("tenant_id")
+
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="missing_tenant_id")
+
+    policy_key = f"ztr:tenant:{tenant_id}:policy"
+    anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
+
+    policy_raw = r.hgetall(policy_key)
+    if not policy_raw:
+        raise HTTPException(status_code=404, detail="policy_not_found")
+
+    policy = {
+        _decode(k): _decode(v)
+        for k, v in policy_raw.items()
+    }
+
+    version = policy.get("version")
+    digest = policy.get("digest")
+
+    if not digest:
+        raise HTTPException(status_code=500, detail="missing_digest")
+
+    r.set(anchor_key, digest)
+
+    timestamp = int(time.time())
+    event_id = f"{tenant_id}:{version}:{digest[:16]}:{timestamp}"
+
+    r.hset(
+        f"ztr:tenant:{tenant_id}:propagation",
+        mapping={
+            "last_updated_timestamp": timestamp,
+            "last_event_id": event_id
+        }
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "status": "fixed",
+        "digest": digest,
+        "anchor": digest
+    }
