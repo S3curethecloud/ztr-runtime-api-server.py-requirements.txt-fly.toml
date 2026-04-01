@@ -67,6 +67,24 @@ async def lifespan(app):
 app = FastAPI(title="Zero Trust Runtime", lifespan=lifespan)
 
 # ---------------------------------------------------------
+# CORS (MOVED ABOVE ROUTERS — CRITICAL FIX)
+# ---------------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://securethecloud.dev",
+        "https://app.securethecloud.dev",
+        "https://stc-intelligence-core.pages.dev",
+        "https://shield.securethecloud.dev",
+        "https://console.securethecloud.dev",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------------------------------------
 # ROUTER REGISTRATION
 # ---------------------------------------------------------
 
@@ -84,23 +102,6 @@ app.include_router(routing_router)
 app.include_router(intelligence_router)
 # app.include_router(revocations_router)
 
-# ---------------------------------------------------------
-# CORS
-# ---------------------------------------------------------
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://securethecloud.dev",
-        "https://app.securethecloud.dev",
-        "https://stc-intelligence-core.pages.dev",
-        "https://shield.securethecloud.dev",
-        "https://console.securethecloud.dev",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 JWT_SECRET         = os.environ["ZTR_JWT_SECRET"]
 JWT_ISSUER         = "ztr-runtime"

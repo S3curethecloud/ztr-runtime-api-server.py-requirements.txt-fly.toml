@@ -250,16 +250,26 @@ async def issue_token(
 
     effective_ttl = opa_result.get("ttl_seconds")
 
+    # 🔧 FIX 3 — TTL CONSISTENCY CHECK
+    if effective_ttl <= 0:
+        raise HTTPException(
+            status_code=500,
+            detail="invalid_ttl_from_policy"
+        )
+
     sid = str(uuid.uuid4())
 
     session_key = tenant_session_key(tenant_id, sid)
     session_index = tenant_session_index_key(tenant_id)
 
+    # 🔧 FIX 1 + FIX 2 — SESSION STRUCTURE
     session_record = {
         "sid": sid,
+        "tid": tenant_id,
+        "ver": JWT_VERSION,
         "principal": req.principal,
         "intent": req.intent,
-        "scopes": json.dumps(req.scopes),
+        "scopes": ",".join(req.scopes),
         "issued_at": now,
         "ttl": effective_ttl,
         "risk": json.dumps(riskdna)
@@ -270,6 +280,20 @@ async def issue_token(
     pipe.expire(session_key, effective_ttl)
     pipe.sadd(session_index, sid)
     pipe.execute()
+
+    # 🔧 FIX 4 — SESSION WRITE VALIDATION
+    if not r.exists(session_key):
+        raise HTTPException(
+            status_code=500,
+            detail="session_write_failed"
+        )
+
+    # 🔒 FIX 7 — INDEX CONSISTENCY CHECK
+    if sid not in r.smembers(session_index):
+        raise HTTPException(
+            status_code=500,
+            detail="session_index_inconsistency"
+        )
 
     exp = now + effective_ttl
 
@@ -317,4 +341,181 @@ async def issue_token(
         "tenant_id": tenant_id,
         "session_id": sid,
         "token": signed_token,
+    }
+
+# =========================================================
+# 🔒 INTROSPECTION ENDPOINT — TELEMETRY + HASHING + CAE HOOK
+# =========================================================
+
+@tokens_router.post("/tokens/introspect")
+async def introspect_token(payload: dict):
+
+    token = payload.get("token")
+
+    if not token:
+        raise HTTPException(status_code=400, detail="missing_token")
+
+    now = int(time.time())
+
+    # -----------------------------------------------------
+    # 🔐 TOKEN HASHING (NO RAW TOKEN EXPOSURE)
+    # -----------------------------------------------------
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+
+    try:
+        decoded = jwt.decode(
+            token,
+            JWT_SECRET,
+            algorithms=["HS256"],
+            audience=JWT_AUDIENCE,
+            issuer=JWT_ISSUER
+        )
+    except jwt.ExpiredSignatureError:
+
+        publish_decision({
+            "event_type": "introspection",
+            "timestamp": now,
+            "tenant_id": "unknown",
+            "session_id": "unknown",
+            "principal": "unknown",
+            "intent": "token:introspect",
+            "decision": "deny",
+            "risk_score": 0,
+            "policy_revision": "introspection",
+            "metadata": {
+                "stage": "introspect",
+                "reason": "expired",
+                "token_hash": token_hash
+            }
+        })
+
+        return {"active": False, "reason": "expired"}
+
+    except jwt.InvalidTokenError:
+
+        publish_decision({
+            "event_type": "introspection",
+            "timestamp": now,
+            "tenant_id": "unknown",
+            "session_id": "unknown",
+            "principal": "unknown",
+            "intent": "token:introspect",
+            "decision": "deny",
+            "risk_score": 0,
+            "policy_revision": "introspection",
+            "metadata": {
+                "stage": "introspect",
+                "reason": "invalid",
+                "token_hash": token_hash
+            }
+        })
+
+        return {"active": False, "reason": "invalid"}
+
+    tenant_id = decoded.get("tid")
+    sid = decoded.get("sid")
+    principal = decoded.get("sub")
+    intent = decoded.get("intent")
+    version = decoded.get("ver")
+
+    if not tenant_id or not sid:
+
+        publish_decision({
+            "event_type": "introspection",
+            "timestamp": now,
+            "tenant_id": tenant_id or "unknown",
+            "session_id": sid or "unknown",
+            "principal": principal or "unknown",
+            "intent": intent or "token:introspect",
+            "decision": "deny",
+            "risk_score": 0,
+            "policy_revision": "introspection",
+            "metadata": {
+                "stage": "introspect",
+                "reason": "malformed",
+                "token_hash": token_hash
+            }
+        })
+
+        return {"active": False, "reason": "malformed"}
+
+    session_key = tenant_session_key(tenant_id, sid)
+    session = r.hgetall(session_key)
+
+    if not session:
+
+        publish_decision({
+            "event_type": "introspection",
+            "timestamp": now,
+            "tenant_id": tenant_id,
+            "session_id": sid,
+            "principal": principal,
+            "intent": intent,
+            "decision": "deny",
+            "risk_score": 0,
+            "policy_revision": "introspection",
+            "metadata": {
+                "stage": "introspect",
+                "reason": "session_not_found",
+                "token_hash": token_hash
+            }
+        })
+
+        return {"active": False, "reason": "session_not_found"}
+
+    if version != JWT_VERSION:
+
+        publish_decision({
+            "event_type": "introspection",
+            "timestamp": now,
+            "tenant_id": tenant_id,
+            "session_id": sid,
+            "principal": principal,
+            "intent": intent,
+            "decision": "deny",
+            "risk_score": 0,
+            "policy_revision": "introspection",
+            "metadata": {
+                "stage": "introspect",
+                "reason": "version_mismatch",
+                "token_hash": token_hash
+            }
+        })
+
+        return {"active": False, "reason": "version_mismatch"}
+
+    # -----------------------------------------------------
+    # 🔒 CAE HOOK POINT (FUTURE REVOCATION / SIGNAL ENGINE)
+    # -----------------------------------------------------
+    # NOTE: DO NOT MODIFY — placeholder for CAE trigger integration
+    cae_trigger = False
+
+    # -----------------------------------------------------
+    # ✅ SUCCESS PATH
+    # -----------------------------------------------------
+    publish_decision({
+        "event_type": "introspection",
+        "timestamp": now,
+        "tenant_id": tenant_id,
+        "session_id": sid,
+        "principal": principal,
+        "intent": intent,
+        "decision": "allow",
+        "risk_score": 0,
+        "policy_revision": "introspection",
+        "metadata": {
+            "stage": "introspect",
+            "token_hash": token_hash,
+            "cae_trigger": cae_trigger
+        }
+    })
+
+    return {
+        "active": True,
+        "tenant_id": tenant_id,
+        "session_id": sid,
+        "principal": principal,
+        "scopes": decoded.get("scopes"),
+        "intent": intent,
+        "exp": decoded.get("exp")
     }

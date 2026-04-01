@@ -170,7 +170,6 @@ def get_control_plane_policy(tenant_id: str = Query(...)):
 
 # =========================================================
 # 🔧 PHASE 7.2 — STEP 1 (BACKEND)
-# ✅ UPDATED ENDPOINT (TENANT REGISTRY + PROPAGATION)
 # =========================================================
 
 @router.get("/control-plane/tenants")
@@ -230,7 +229,7 @@ def get_control_plane_tenants():
 
 
 # =========================================================
-# 🔧 CONTROL-PLANE TENANT SESSION REVOCATION
+# 🔧 CONTROL-PLANE TENANT SESSION REVOCATION (UPDATED)
 # =========================================================
 
 @router.post("/control-plane/revoke-tenant")
@@ -244,8 +243,39 @@ def revoke_tenant_sessions(payload: dict):
     keys = r.keys(pattern)
 
     count = 0
+
+    import re
+    session_index = f"ztr:{tenant_id}:sessions"
+
     for key in keys:
-        r.delete(key)
+        match = re.match(rf"ztr:{tenant_id}:session:(.+)", key)
+        sid = match.group(1) if match else None
+
+        pipe = r.pipeline()
+
+        pipe.delete(key)
+
+        if sid:
+            pipe.srem(session_index, sid)
+
+            r.publish("decision_events", json.dumps({
+                "event_type": "revocation",
+                "timestamp": int(time.time()),
+                "tenant_id": tenant_id,
+                "session_id": sid,
+                "principal": "system",
+                "intent": "session:revoke",
+                "decision": "allow",
+                "risk_score": 0,
+                "policy_revision": "control-plane",
+                "metadata": {
+                    "source": "control-plane",
+                    "stage": "revoke"
+                }
+            }))
+
+        pipe.execute()
+
         count += 1
 
     return {
