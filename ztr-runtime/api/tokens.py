@@ -91,6 +91,44 @@ def enforce_obligations(decision, request):
             )
 
 
+def validate_decision_event(event: dict):
+    required_fields = [
+        "event_type",
+        "timestamp",
+        "tenant_id",
+        "session_id",
+        "principal",
+        "intent",
+        "decision",
+        "risk_score",
+        "policy_revision",
+        "metadata"
+    ]
+
+    for field in required_fields:
+        if field not in event:
+            raise ValueError(f"Decision event missing required field: {field}")
+
+    if event["event_type"] != "decision":
+        raise ValueError("Invalid event_type")
+
+    if event["decision"] not in ("allow", "deny"):
+        raise ValueError("Invalid decision value")
+
+    if not isinstance(event["timestamp"], int):
+        raise ValueError("timestamp must be int")
+
+    if not isinstance(event["metadata"], dict):
+        raise ValueError("metadata must be object")
+
+    forbidden_aliases = ["tenant", "risk", "policy"]
+    for alias in forbidden_aliases:
+        if alias in event:
+            raise ValueError(f"Forbidden field detected: {alias}")
+
+    return True
+
+
 @tokens_router.post("/tokens/issue")
 async def issue_token(
     req: TokenIssueRequest,
@@ -140,10 +178,6 @@ async def issue_token(
 
     print("OPA INPUT →", json.dumps(policy_input, indent=2))
 
-    # --------------------------------------------------
-    # 🔒 PHASE 7.4 — CONTROL PLANE ENFORCEMENT (NO DRIFT)
-    # --------------------------------------------------
-
     policy_key = f"ztr:tenant:{tenant_id}:policy"
     anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
 
@@ -184,6 +218,26 @@ async def issue_token(
     opa_result = evaluate_issue_policy(policy_input)
 
     if not opa_result.get("allow"):
+
+        event = {
+            "event_type": "decision",
+            "timestamp": int(time.time()),
+            "tenant_id": tenant_id,
+            "session_id": "N/A",
+            "principal": req.principal,
+            "intent": req.intent,
+            "decision": "deny",
+            "risk_score": context.get("risk_score"),
+            "policy_revision": policy_input.get("policy_revision"),
+            "metadata": {
+                "source": "runtime",
+                "stage": "issue"
+            }
+        }
+
+        validate_decision_event(event)
+
+        publish_decision(event)
 
         raise HTTPException(
             status_code=403,
@@ -237,6 +291,26 @@ async def issue_token(
         JWT_SECRET,
         algorithm="HS256"
     )
+
+    event = {
+        "event_type": "decision",
+        "timestamp": int(time.time()),
+        "tenant_id": tenant_id,
+        "session_id": sid,
+        "principal": req.principal,
+        "intent": req.intent,
+        "decision": "allow",
+        "risk_score": context.get("risk_score"),
+        "policy_revision": policy_input.get("policy_revision"),
+        "metadata": {
+            "source": "runtime",
+            "stage": "issue"
+        }
+    }
+
+    validate_decision_event(event)
+
+    publish_decision(event)
 
     return {
         "status": "issued",
