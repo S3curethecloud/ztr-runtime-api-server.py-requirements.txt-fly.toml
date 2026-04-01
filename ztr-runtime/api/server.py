@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 import redis
 import time
 import os
@@ -83,6 +83,14 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ---------------------------------------------------------
+# 🔧 PRE-FLIGHT HANDLER (CORS HARD FIX)
+# ---------------------------------------------------------
+
+@app.options("/{full_path:path}")
+async def preflight_handler(full_path: str):
+    return Response(status_code=200)
 
 # ---------------------------------------------------------
 # ROUTER REGISTRATION

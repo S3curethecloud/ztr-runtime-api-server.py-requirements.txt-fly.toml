@@ -42,17 +42,9 @@ r = redis.from_url(
 )
 
 
-# ---------------------------------------------------------
-# Helper to get the current period (Year-Month)
-# ---------------------------------------------------------
-
 def current_period() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m")
 
-
-# ---------------------------------------------------------
-# GET /v1/sessions/active
-# ---------------------------------------------------------
 
 @sessions_router.get("/active")
 def list_active_sessions(
@@ -71,7 +63,6 @@ def list_active_sessions(
 
         data = r.hgetall(key)
 
-        # lazy cleanup of expired or missing sessions
         if not data:
             r.srem(index_key, sid)
             continue
@@ -79,12 +70,19 @@ def list_active_sessions(
         issued_at = int(data.get("issued_at", 0))
         ttl = r.ttl(key)
 
+        raw_scopes = data.get("scopes", "[]")
+
+        try:
+            scopes = json.loads(raw_scopes)
+        except:
+            scopes = raw_scopes.split(",") if raw_scopes else []
+
         sessions.append({
             "session_id": sid,
             "tenant_id": tenant_id,
             "principal": data.get("principal"),
             "intent": data.get("intent"),
-            "scopes": json.loads(data.get("scopes", "[]")),
+            "scopes": scopes,
             "issued_at": issued_at,
             "ttl": ttl,
             "risk": json.loads(data.get("risk", "null"))
@@ -96,10 +94,6 @@ def list_active_sessions(
         "sessions": sessions
     }
 
-
-# ---------------------------------------------------------
-# POST /v1/sessions/revoke
-# ---------------------------------------------------------
 
 @sessions_router.post("/revoke")
 async def revoke_session(
@@ -131,13 +125,9 @@ async def revoke_session(
 
     pipe.execute()
 
-    # Governance Metric Counter
     r.incr("metrics:sessions_revoked")
-
-    # Active session counter update
     r.decr("ztr:sessions:active")
 
-    # Increment the sessions_revoked counter for the current period
     period = current_period()
     r.incr(tenant_usage_key(tenant_id, period, "sessions_revoked"))
 
