@@ -12,6 +12,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
+    bash \
  && rm -rf /var/lib/apt/lists/*
 
 # -------------------------------------------------
@@ -48,4 +49,4 @@ USER runtimeuser
 
 EXPOSE 8000
 
-CMD ["/start-runtime.sh"]
+CMD ["bash", "/start-runtime.sh"]

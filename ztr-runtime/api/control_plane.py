@@ -1,9 +1,12 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Header
 import redis
 import os
 import json
 import time
 import hashlib
+
+from audit_chain import emit_event
+from api.redis_keys import tenant_session_key, tenant_session_index_key
 
 router = APIRouter(prefix="/v1/admin", tags=["control-plane"])
 
@@ -14,9 +17,23 @@ r = redis.from_url(
     decode_responses=True
 )
 
+ADMIN_SECRET = os.environ.get("ADMIN_SECRET", "")
+
+
+def _require_admin(x_stc_admin_secret: str = Header(None)) -> None:
+    if not ADMIN_SECRET:
+        raise HTTPException(status_code=503, detail="admin_not_configured")
+
+    if not x_stc_admin_secret or x_stc_admin_secret != ADMIN_SECRET:
+        raise HTTPException(status_code=403, detail="forbidden")
+
 
 @router.post("/policy/publish")
-async def publish_policy_update(payload: dict):
+async def publish_policy_update(
+    payload: dict,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
 
     tenant_id = payload.get("tenant_id")
     policy_text = payload.get("bundle")
@@ -37,6 +54,18 @@ async def publish_policy_update(payload: dict):
     policy_digest = hashlib.sha256(
         policy_text.encode()
     ).hexdigest()
+
+    # 🔒 STEP 7.3 — GLOBAL POLICY AUTHORITY WRITE
+    global_policy_key = f"ztr:policy:global:{policy_digest}"
+
+    if not r.exists(global_policy_key):
+        r.hset(global_policy_key, mapping={
+            "digest": policy_digest,
+            "version": version,
+            "created_at": int(time.time())
+        })
+
+    r.set(f"ztr:policy:version:{version}", policy_digest)
 
     r.hset(policy_key, mapping={
         "version": policy_revision,
@@ -73,6 +102,19 @@ async def publish_policy_update(payload: dict):
 
     r.publish("policy_updates", json.dumps(message))
 
+    # 🔒 STEP 7.4 — MANAGEMENT AUDIT EVENT
+    emit_event(
+        tenant_id=tenant_id,
+        event_type="control_plane.policy_published",
+        service="control-plane",
+        payload={
+            "policy_version": version,
+            "policy_digest": policy_digest,
+            "event_id": event_id,
+            "timestamp": timestamp
+        }
+    )
+
     return {
         "status": "published",
         "policy": result["policy"],
@@ -92,6 +134,16 @@ def update_policy(tenant_id: str, policy_text: str, version: str):
 
     r.set(f"ztr:tenant:{tenant_id}:policy_anchor", digest)
 
+    # 🔒 CONTROL PLANE REGISTRY SYNC (STEP 7.2)
+    registry_key = f"ztr:control:tenant:{tenant_id}"
+
+    if r.exists(registry_key):
+        r.hset(registry_key, mapping={
+            "policy_version": version,
+            "policy_digest": digest,
+            "last_updated": int(time.time())
+        })
+
     return {
         "status": "policy_updated",
         "version": version,
@@ -100,12 +152,19 @@ def update_policy(tenant_id: str, policy_text: str, version: str):
 
 
 def revoke_all_sessions(tenant_id: str):
-    pattern = f"ztr:{tenant_id}:session:*"
+    session_index = tenant_session_index_key(tenant_id)
+    sids = r.smembers(session_index)
 
     revoked = 0
 
-    for key in r.scan_iter(pattern):
-        r.delete(key)
+    for sid in list(sids):
+        session_key = tenant_session_key(tenant_id, sid)
+
+        pipe = r.pipeline()
+        pipe.delete(session_key)
+        pipe.srem(session_index, sid)
+        pipe.execute()
+
         revoked += 1
 
     return {
@@ -138,7 +197,11 @@ def _decode(value):
 
 
 @router.get("/control-plane/policy")
-def get_control_plane_policy(tenant_id: str = Query(...)):
+def get_control_plane_policy(
+    tenant_id: str = Query(...),
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
     policy_key = f"ztr:tenant:{tenant_id}:policy"
     anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
 
@@ -173,7 +236,10 @@ def get_control_plane_policy(tenant_id: str = Query(...)):
 # =========================================================
 
 @router.get("/control-plane/tenants")
-def get_control_plane_tenants():
+def get_control_plane_tenants(
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
     pattern = "ztr:tenant:*:policy"
     keys = r.keys(pattern)
 
@@ -233,48 +299,44 @@ def get_control_plane_tenants():
 # =========================================================
 
 @router.post("/control-plane/revoke-tenant")
-def revoke_tenant_sessions(payload: dict):
+def revoke_tenant_sessions(
+    payload: dict,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
     tenant_id = payload.get("tenant_id")
 
     if not tenant_id:
         raise HTTPException(status_code=400, detail="missing_tenant_id")
 
-    pattern = f"ztr:{tenant_id}:session:*"
-    keys = r.keys(pattern)
+    session_index = tenant_session_index_key(tenant_id)
+    sids = r.smembers(session_index)
 
     count = 0
 
-    import re
-    session_index = f"ztr:{tenant_id}:sessions"
-
-    for key in keys:
-        match = re.match(rf"ztr:{tenant_id}:session:(.+)", key)
-        sid = match.group(1) if match else None
+    for sid in list(sids):
+        session_key = tenant_session_key(tenant_id, sid)
 
         pipe = r.pipeline()
-
-        pipe.delete(key)
-
-        if sid:
-            pipe.srem(session_index, sid)
-
-            r.publish("decision_events", json.dumps({
-                "event_type": "revocation",
-                "timestamp": int(time.time()),
-                "tenant_id": tenant_id,
-                "session_id": sid,
-                "principal": "system",
-                "intent": "session:revoke",
-                "decision": "allow",
-                "risk_score": 0,
-                "policy_revision": "control-plane",
-                "metadata": {
-                    "source": "control-plane",
-                    "stage": "revoke"
-                }
-            }))
-
+        pipe.delete(session_key)
+        pipe.srem(session_index, sid)
         pipe.execute()
+
+        r.publish("decision_events", json.dumps({
+            "event_type": "decision",
+            "timestamp": int(time.time()),
+            "tenant_id": tenant_id,
+            "session_id": sid,
+            "principal": "system",
+            "intent": "session:revoke",
+            "decision": "deny",
+            "risk_score": 0,
+            "policy_revision": "control-plane",
+            "metadata": {
+                "source": "control-plane",
+                "stage": "revoke"
+            }
+        }))
 
         count += 1
 
@@ -290,7 +352,11 @@ def revoke_tenant_sessions(payload: dict):
 # =========================================================
 
 @router.post("/control-plane/fix-tenant")
-def fix_tenant(payload: dict):
+def fix_tenant(
+    payload: dict,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
     tenant_id = payload.get("tenant_id")
 
     if not tenant_id:

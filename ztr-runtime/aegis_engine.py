@@ -1,35 +1,107 @@
+import sys
+sys.path.append("/app")
+
 import requests
 import json
 import hashlib
 from datetime import datetime, UTC
 import time
+import os
+
+from audit_chain import emit_event
 
 
-def get_latest_signal(tenant_id: str, principal: str) -> dict:
-    """
-    Phase 8.1 — deterministic signal fetch
+# 🔒 PHASE 8 — DRIFT ANALYSIS ENGINE
+def analyze_drift(events):
+    if len(events) < 5:
+        return {"drift": "INSUFFICIENT_DATA", "escalation": "NONE"}
 
-    Returns last known Aegis signal for principal.
-    Fail-safe: return None if not available.
-    """
+    risk_values = [e.get("risk_delta", 0) for e in events[:5]]
+    anomaly_flags = [e.get("anomaly", False) for e in events[:5]]
+    velocity_values = [e.get("velocity", 0) for e in events[:5]]
 
+    # DRIFT UP (monotonic increase)
+    if all(risk_values[i] <= risk_values[i-1] for i in range(1, len(risk_values))):
+        return {"drift": "DRIFT_UP", "escalation": "INCREASE_RISK"}
+
+    # VELOCITY SPIKE
+    if max(velocity_values) > 5:
+        return {"drift": "DRIFT_SPIKE", "escalation": "REDUCE_TTL"}
+
+    # ANOMALY DETECTED
+    if any(anomaly_flags):
+        return {"drift": "DRIFT_ANOMALY", "escalation": "FORCE_DENY"}
+
+    return {"drift": "STABLE", "escalation": "NONE"}
+
+
+# ⚙️ STEP 1 — Persist Aegis Signals to Redis (Time-Series)
+def store_aegis_temporal(r, tenant_id, principal, signal):
+    key = f"ztr:aegis:timeline:{tenant_id}:{principal}"
+
+    entry = {
+        "ts": int(time.time()),
+        "anomaly": bool(signal.get("anomaly", False)),
+        "velocity": int(signal.get("velocity", 1)),
+        "confidence": float(signal.get("confidence", 0.95)),
+        "risk_delta": int(signal.get("risk_delta", 0))
+    }
+
+    # 🔒 STEP 2 — HASH BINDING (AUDIT INTEGRITY)
+    entry_hash = hashlib.sha256(
+        json.dumps(entry, sort_keys=True).encode()
+    ).hexdigest()
+
+    entry["hash"] = entry_hash
+
+    # 🔄 STORE EVENT
+    r.lpush(key, json.dumps(entry))
+    r.ltrim(key, 0, 49)
+
+    # 🔍 PHASE 8 — DRIFT DETECTION
     try:
-        import redis, os
+        events = r.lrange(key, 0, 5)
+        parsed = []
 
-        r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
+        for e in events:
+            try:
+                parsed.append(json.loads(e))
+            except Exception:
+                continue
 
-        key = f"ztr:aegis:{tenant_id}:{principal}"
+        drift_result = analyze_drift(parsed)
 
-        data = r.get(key)
-
-        if not data:
-            return None
-
-        import json
-        return json.loads(data)
+        entry["drift"] = drift_result["drift"]
+        entry["escalation"] = drift_result["escalation"]
 
     except Exception:
-        return None
+        entry["drift"] = "UNKNOWN"
+        entry["escalation"] = "NONE"
+
+    # 🔒 STEP 3 — EMIT AUDIT EVENT (CHAIN LINK)
+    try:
+        emit_event(
+            event_type="aegis_temporal",
+            service="aegis-core",
+            tenant_id=tenant_id,
+            payload=entry
+        )
+
+        # 🔒 PHASE 8 — DRIFT AUDIT EVENT
+        emit_event(
+            event_type="aegis_drift",
+            service="aegis-core",
+            tenant_id=tenant_id,
+            payload={
+                "principal": principal,
+                "drift": entry.get("drift"),
+                "escalation": entry.get("escalation"),
+                "ts": entry.get("ts")
+            }
+        )
+
+    except Exception:
+        pass
 
 
 def generate_riskdna(event):
@@ -57,7 +129,9 @@ def build_policy_input(riskdna, event):
             "session_binding": "device-demo-123",
             "after_hours": False,
             "anomaly": signals.get("anomaly", False),
-            "velocity": signals.get("velocity", 0)
+            "velocity": signals.get("velocity", 0),
+            "confidence": signals.get("confidence", 0.95),
+            "risk_delta": signals.get("risk_delta", 0)
         },
         "policy_revision": "local-dev",
         "timestamp": riskdna["timestamp"]
@@ -73,9 +147,6 @@ def build_policy_input(riskdna, event):
 
 
 def call_opa(policy_input):
-    """
-    Deterministic OPA evaluation (FAIL-CLOSED, observable, normalized)
-    """
     try:
         response = requests.post(
             "http://localhost:8181/v1/data/ztr/issue/decision",
@@ -84,12 +155,9 @@ def call_opa(policy_input):
         )
 
         if response.status_code != 200:
-            print("[AEGIS][OPA ERROR] HTTP", response.status_code)
-
             return {
                 "allow": False,
-                "reason": "opa_http_error",
-                "status_code": response.status_code
+                "reason": "opa_http_error"
             }
 
         result = response.json()
@@ -98,7 +166,6 @@ def call_opa(policy_input):
         if isinstance(decision, bool):
             return {
                 "allow": decision,
-                "reason": "opa_eval_boolean",
                 "obligations": [],
                 "ttl_seconds": 300,
                 "policy_revision": policy_input.get("policy_revision", "unknown")
@@ -107,25 +174,15 @@ def call_opa(policy_input):
         if isinstance(decision, dict):
             return {
                 "allow": decision.get("allow", False),
-                "reason": "opa_eval_object",
                 "obligations": decision.get("obligations", []),
                 "ttl_seconds": decision.get("ttl_seconds", 0),
                 "policy_revision": decision.get("policy_revision", "unknown")
             }
 
-        return {
-            "allow": False,
-            "reason": "opa_invalid_response"
-        }
+        return {"allow": False}
 
-    except Exception as e:
-        print("[AEGIS][OPA DOWN]", str(e))
-
-        return {
-            "allow": False,
-            "reason": "opa_unavailable",
-            "error": str(e)
-        }
+    except Exception:
+        return {"allow": False}
 
 
 def emit_signal(riskdna, decision, policy_input):
@@ -143,29 +200,22 @@ def emit_signal(riskdna, decision, policy_input):
 def enforce_obligations(decision, policy_input):
     obligations = decision.get("obligations", [])
 
-    print("[ENFORCEMENT] Evaluating obligations...")
-
     for obligation in obligations:
 
         if obligation == "ROLE_MATCHED":
-            print("[ENFORCEMENT] Role verified ✔")
+            pass
 
         elif obligation == "AMOUNT_OK":
             amount = policy_input.get("amount") or policy_input.get("input", {}).get("amount")
             if amount and amount > 1000:
-                print("[ENFORCEMENT] Amount exceeds limit ❌")
                 return False
-            print("[ENFORCEMENT] Amount within limit ✔")
 
         elif obligation == "RISK_OK":
             risk = policy_input["context"].get("risk_score", 0)
             if risk > 80:
-                print("[ENFORCEMENT] High risk detected ❌")
                 return False
-            print("[ENFORCEMENT] Risk acceptable ✔")
 
         elif obligation == "REVIEW_REQUIRED":
-            print("[ENFORCEMENT] Manual review required ⚠")
             return False
 
     return True
@@ -177,27 +227,17 @@ def process_event(event):
     decision = call_opa(policy_input)
 
     if not decision.get("allow"):
-        print(json.dumps({
-            "status": "DENY",
-            "reason": decision.get("reason"),
-            "engine": "aegis-core"
-        }, indent=2))
         return
 
     emit_signal(riskdna, decision, policy_input)
 
-    # 🔒 Enforcement layer
     allowed = enforce_obligations(decision, policy_input)
 
     if not allowed:
-        print({
-            "status": "BLOCKED_BY_ENFORCEMENT",
-            "engine": "aegis-core"
-        })
         return
 
     try:
-        import redis, os
+        import redis
 
         r = redis.from_url(os.environ["REDIS_URL"], decode_responses=True)
 
@@ -206,13 +246,20 @@ def process_event(event):
 
         key = f"ztr:aegis:{tenant_id}:{principal}"
 
+        signal = {
+            "anomaly": bool(policy_input["context"].get("anomaly", False)),
+            "velocity": int(policy_input["context"].get("velocity", 1)),
+            "confidence": float(policy_input["context"].get("confidence", 0.95)),
+            "risk_delta": int(policy_input["context"].get("risk_delta", 0))
+        }
+
         r.set(key, json.dumps({
-            "anomaly": True,
-            "velocity": 1,
-            "confidence": 0.95,
-            "risk_delta": 0,
+            **signal,
             "ts": int(time.time())
         }))
+
+        # 🔒 Temporal + Audit + Drift Binding
+        store_aegis_temporal(r, tenant_id, principal, signal)
 
     except Exception:
         pass

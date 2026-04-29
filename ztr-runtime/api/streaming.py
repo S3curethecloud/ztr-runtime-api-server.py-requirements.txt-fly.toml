@@ -1,12 +1,14 @@
 import json
 import asyncio
 import redis
-from fastapi import APIRouter, Request, Query, Depends
+from fastapi import APIRouter, Request, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 import os
 import logging
+import time
+import uuid
 
-from api.auth import require_tenant_api_key
+from api.auth import require_tenant_api_key, derive_tenant_from_api_key
 
 router = APIRouter(prefix="/v1")
 
@@ -17,33 +19,43 @@ r = redis.from_url(
     decode_responses=True
 )
 
-CHANNEL = "stc:decisions"
+CHANNEL = "decision_events"
 
 logger = logging.getLogger("stc.runtime")
 
 
-# --------------------------------------------------
-# Publish decision events
-# --------------------------------------------------
-
 def publish_decision(event: dict):
+    try:
+        now = int(time.time() * 1000)
 
-    # --------------------------------------------------
-    # Publish real-time event (SSE stream)
-    # --------------------------------------------------
+        payload = {
+            "event_type": "decision",
+            "timestamp": event.get("timestamp") or now,
+            "tenant_id": event.get("tenant_id"),
+            "principal": event.get("principal"),
+            "intent": event.get("intent"),
+            "decision": event.get("decision") or "unknown",
+            "risk_score": event.get("risk_score") if event.get("risk_score") is not None else 0,
+            "policy_revision": event.get("policy_revision") or "unknown",
+            "event_id": event.get("event_id") or str(uuid.uuid4()),
+            "metadata": event.get("metadata", {})
+        }
 
-    r.publish(CHANNEL, json.dumps(event))
+        r.publish(CHANNEL, json.dumps(payload))
 
-    # --------------------------------------------------
-    # Persist decision for replay (🔒 NEW)
-    # --------------------------------------------------
+    except Exception as e:
+        logger.error(
+            "publish_decision error",
+            extra={"error": str(e), "event": event}
+        )
+        return
 
     try:
-        tenant_id = event.get("tenant_id", "unknown")
+        tenant_id = payload.get("tenant_id") or "unknown"
         key = f"ztr:{tenant_id}:decisions"
 
-        r.lpush(key, json.dumps(event))
-        r.ltrim(key, 0, 49)  # keep last 50
+        r.lpush(key, json.dumps(payload))
+        r.ltrim(key, 0, 49)
 
     except Exception as exc:
         logger.error(
@@ -51,20 +63,14 @@ def publish_decision(event: dict):
             extra={"error": str(exc), "event": event}
         )
 
-    # --------------------------------------------------
-    # Persist decision for intelligence analytics
-    # --------------------------------------------------
-
     try:
+        ts = int(payload.get("timestamp") or 0)
 
-        ts = int(event.get("timestamp") or 0)
-
-        tenant = event.get("tenant_id", "unknown")
-        principal = event.get("principal", "unknown")
-        intent = event.get("intent", "unknown")
-        decision = event.get("decision", "unknown")
-
-        risk_score = int(event.get("risk_score") or 0)
+        tenant = payload.get("tenant_id") or "unknown"
+        principal = payload.get("principal") or "unknown"
+        intent = payload.get("intent") or "unknown"
+        decision = payload.get("decision") or "unknown"
+        risk_score = payload.get("risk_score") if payload.get("risk_score") is not None else 0
 
         decision_key = f"metrics:decision:{ts}:{tenant}:{principal}:{intent}:{decision}"
 
@@ -76,24 +82,67 @@ def publish_decision(event: dict):
                 "intent": intent,
                 "decision": decision,
                 "risk_score": risk_score,
-                "policy_revision": event.get("policy_revision")
+                "policy_revision": payload.get("policy_revision")
             }
         )
 
-        # retain decision history for 24 hours
         r.expire(decision_key, 86400)
 
     except Exception as exc:
-
         logger.error(
             "decision persistence failure",
             extra={"error": str(exc), "event": event}
         )
 
+    # 🔒 AEGIS TIMELINE WRITE (CRITICAL)
+    try:
+        tenant_id = payload.get("tenant_id")
+        principal = payload.get("principal")
 
-# --------------------------------------------------
-# Replay endpoint (🔒 FIXED + HARDENED)
-# --------------------------------------------------
+        if tenant_id and principal:
+            timeline_key = f"ztr:aegis:timeline:{tenant_id}:{principal}"
+
+            r.lpush(timeline_key, json.dumps({
+                "timestamp": payload.get("timestamp"),
+                "decision": payload.get("decision"),
+                "risk_score": payload.get("risk_score") if payload.get("risk_score") is not None else 0,
+                "policy_revision": payload.get("policy_revision"),
+                "event_id": payload.get("event_id")
+            }))
+
+            r.ltrim(timeline_key, 0, 50)
+
+    except Exception as exc:
+        logger.error(
+            "aegis timeline write failure",
+            extra={"error": str(exc), "event": event}
+        )
+
+    # 🔒 AEGIS CURRENT SIGNAL (REAL-TIME)
+    try:
+        tenant_id = payload.get("tenant_id")
+        principal = payload.get("principal")
+
+        if tenant_id and principal:
+            current_key = f"ztr:aegis:{tenant_id}:{principal}"
+
+            r.set(
+                current_key,
+                json.dumps({
+                    "anomaly": 1 if payload.get("decision") == "deny" else 0,
+                    "risk_delta": payload.get("risk_score") if payload.get("risk_score") is not None else 0,
+                    "confidence": 0.9,
+                    "ts": payload.get("timestamp")
+                }),
+                ex=300
+            )
+
+    except Exception as exc:
+        logger.error(
+            "aegis current signal failure",
+            extra={"error": str(exc), "event": event}
+        )
+
 
 @router.get("/decisions/recent")
 def get_recent_decisions(
@@ -109,33 +158,44 @@ def get_recent_decisions(
     }
 
 
-# --------------------------------------------------
-# Stream events (FIXED: disconnect-safe + cleanup)
-# --------------------------------------------------
-
-async def event_generator(request: Request):
-
+async def event_generator(request: Request, tenant_id: str):
     pubsub = r.pubsub()
     pubsub.subscribe(CHANNEL)
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
+    last_keepalive = time.time()
 
     try:
         while True:
-
-            # 🔴 CRITICAL: stop when client disconnects
             if await request.is_disconnected():
                 break
 
             message = await loop.run_in_executor(
                 None,
-                pubsub.get_message,
-                True,
-                None
+                lambda: pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
             )
 
-            if message and message["type"] == "message":
-                yield f"data: {message['data']}\n\n"
+            if message and message.get("type") == "message":
+                try:
+                    event = json.loads(message["data"])
+                except Exception as exc:
+                    logger.error("decision stream json decode failure", extra={"error": str(exc)})
+                    continue
+
+                if event.get("tenant_id") != tenant_id:
+                    continue
+
+                yield f"data: {json.dumps(event)}\n\n"
+                last_keepalive = time.time()
+                continue
+
+            if time.time() - last_keepalive >= 15:
+                yield ": keepalive\n\n"
+                last_keepalive = time.time()
+
+    except Exception:
+        logger.exception("decision stream generator failure")
+        raise
 
     finally:
         try:
@@ -144,24 +204,22 @@ async def event_generator(request: Request):
             pubsub.close()
 
 
-# --------------------------------------------------
-# Endpoint (FIXED: dual-mode auth)
-# --------------------------------------------------
-
 @router.get("/decisions/stream")
 async def stream_decisions(
     request: Request,
     api_key: str = Query(None)
 ):
-    # 🔐 Support BOTH header auth (future) and query auth (EventSource)
+    if not api_key:
+        raise HTTPException(status_code=401, detail="Missing API key")
 
-    if api_key:
-        tenant_id = require_tenant_api_key(api_key)
-    else:
-        # fallback to header-based auth
-        tenant_id = require_tenant_api_key(request)
+    tenant_id = derive_tenant_from_api_key(api_key)
 
     return StreamingResponse(
-        event_generator(request),
-        media_type="text/event-stream"
+        event_generator(request, tenant_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
     )

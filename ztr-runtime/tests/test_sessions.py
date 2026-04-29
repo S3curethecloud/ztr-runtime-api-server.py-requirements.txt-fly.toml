@@ -13,6 +13,8 @@ def test_session_created():
     payload = {
         "principal": "agent-demo",
         "intent": "controlplane:access",
+            "scopes": ["controlplane:access"],
+            "ttl_seconds": 300,
         "context": {
             "tenant_id": "tenant-test"
         }
@@ -34,6 +36,8 @@ def test_session_revocation():
     payload = {
         "principal": "agent-demo",
         "intent": "controlplane:access",
+            "scopes": ["controlplane:access"],
+            "ttl_seconds": 300,
         "context": {
             "tenant_id": "tenant-test"
         }

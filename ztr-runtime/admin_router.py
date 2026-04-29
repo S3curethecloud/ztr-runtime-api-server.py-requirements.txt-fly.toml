@@ -36,6 +36,7 @@ from api.redis_keys import (
     tenant_session_key,
     tenant_session_index_key,
     tenant_usage_key,
+    apikey_lookup_key
 )
 
 
@@ -130,15 +131,39 @@ def admin_metrics(
 ):
     _require_admin(x_stc_admin_secret)
 
-    tenants = list(_r.scan_iter("ztr:tenant:*:meta"))
-    sessions = list(_r.scan_iter("ztr:*:session:*"))
+    tenant_count = 0
+    active_sessions = 0
+    tokens_issued = 0
+    policy_denied = 0
+    sessions_revoked = 0
+
+    for _ in _r.scan_iter("ztr:tenant:*:meta"):
+        tenant_count += 1
+
+    for key in _r.scan_iter("ztr:*:session:*"):
+        active_sessions += 1
+
+        data = _r.hgetall(key)
+        if data.get("revoked") == "true":
+            sessions_revoked += 1
+
+    for key in _r.scan_iter("metrics:decision:*"):
+        data = _r.hgetall(key)
+
+        if not data:
+            continue
+
+        tokens_issued += 1
+
+        if data.get("decision") == "deny":
+            policy_denied += 1
 
     return {
-        "tenant_count": len(tenants),
-        "active_sessions": len(sessions),
-        "tokens_issued": 0,
-        "policy_denied": 0,
-        "sessions_revoked": 0
+        "tenant_count": tenant_count,
+        "active_sessions": active_sessions,
+        "tokens_issued": tokens_issued,
+        "policy_denied": policy_denied,
+        "sessions_revoked": sessions_revoked
     }
 
 
@@ -234,17 +259,11 @@ def list_tenant_summaries(
 
 
 # ---------------------------------------------------------
-# GET /v1/admin/tenants/{tenant_id}/summary
+# Tenant detail helpers
 # ---------------------------------------------------------
 
 
-@admin_router.get("/tenants/{tenant_id}/summary")
-def tenant_summary(
-    tenant_id: str,
-    x_stc_admin_secret: str = Header(None),
-):
-    _require_admin(x_stc_admin_secret)
-
+def _get_tenant_meta_or_404(tenant_id: str) -> dict:
     meta_key = f"ztr:tenant:{tenant_id}:meta"
 
     raw = _r.get(meta_key)
@@ -252,26 +271,142 @@ def tenant_summary(
     if raw is None:
         raise HTTPException(status_code=404, detail="tenant_not_found")
 
-    meta = json.loads(raw)
+    try:
+        meta = json.loads(raw)
+    except Exception:
+        raise HTTPException(status_code=500, detail="tenant_meta_invalid")
 
-    policy_anchor = None
+    return meta
 
+
+def _parse_scopes(raw_scopes):
+    if isinstance(raw_scopes, list):
+        return raw_scopes
+
+    if raw_scopes is None:
+        return []
+
+    try:
+        scopes = json.loads(raw_scopes)
+    except Exception:
+        scopes = str(raw_scopes).split(",") if raw_scopes else []
+
+    if not isinstance(scopes, list):
+        return []
+
+    return scopes
+
+
+def _read_policy_anchor(tenant_id: str):
     anchor_key = f"ztr:tenant:{tenant_id}:policy_anchor"
 
     try:
-        if _r.exists(anchor_key):
-            policy_anchor = _r.get(anchor_key)
+        if _r.type(anchor_key) == "string":
+            return _r.get(anchor_key)
     except Exception:
-        policy_anchor = None
+        return None
+
+    return None
+
+
+def _read_policy_version(tenant_id: str):
+    policy_key = f"ztr:tenant:{tenant_id}:policy"
+
+    try:
+        if _r.type(policy_key) == "hash":
+            policy = _r.hgetall(policy_key) or {}
+            return policy.get("version") or POLICY_REVISION
+    except Exception:
+        return POLICY_REVISION
+
+    return POLICY_REVISION
+
+
+# ---------------------------------------------------------
+# GET /v1/admin/tenants/{tenant_id}/summary
+# ---------------------------------------------------------
+
+
+@admin_router.get("/tenants/{tenant_id}/summary")
+def get_tenant_summary(
+    tenant_id: str,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    _get_tenant_meta_or_404(tenant_id)
+
+    status = _r.get(f"ztr:tenant:{tenant_id}:status") or "active"
+    policy_version = _read_policy_version(tenant_id)
+    policy_anchor = _read_policy_anchor(tenant_id)
 
     return {
         "tenant_id": tenant_id,
-        "status": "active",
-        "policy_version": POLICY_REVISION,
+        "status": status,
+        "policy_version": policy_version,
         "policy_anchor": policy_anchor,
-        "created_at": meta.get("created_at")
     }
 
+
+# ---------------------------------------------------------
+# GET /v1/admin/tenants/{tenant_id}/usage
+# ---------------------------------------------------------
+
+
+@admin_router.get("/tenants/{tenant_id}/usage")
+def get_tenant_usage(
+    tenant_id: str,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    _get_tenant_meta_or_404(tenant_id)
+
+    period = current_period()
+    usage_key = tenant_usage_key(tenant_id, period)
+    usage = _r.hgetall(usage_key) or {}
+
+    index_key = tenant_session_index_key(tenant_id)
+    sids = _r.smembers(index_key)
+
+    risk_score = 0
+
+    for sid in list(sids):
+        session_key = tenant_session_key(tenant_id, sid)
+
+        data = _r.hgetall(session_key)
+        ttl = _r.ttl(session_key)
+
+        if not data or ttl <= 0:
+            _r.srem(index_key, sid)
+            continue
+
+        raw_risk = data.get("risk", "null")
+
+        try:
+            risk = json.loads(raw_risk)
+        except Exception:
+            risk = {}
+
+        if not isinstance(risk, dict):
+            risk = {}
+
+        try:
+            score = int(float(risk.get("final_score") or 0))
+        except Exception:
+            score = 0
+
+        if score > risk_score:
+            risk_score = score
+
+    return {
+        "tenant_id": tenant_id,
+        "tokens_issued": int(usage.get("tokens_issued") or 0),
+        "policy_denied": int(usage.get("policy_denied") or 0),
+        "sessions_revoked": int(usage.get("sessions_revoked") or 0),
+        "risk_score": risk_score,
+        "period": period,
+    }
 
 # ---------------------------------------------------------
 # GET /v1/admin/tenants/{tenant_id}/sessions
@@ -279,70 +414,402 @@ def tenant_summary(
 
 
 @admin_router.get("/tenants/{tenant_id}/sessions")
-def tenant_sessions(
+def get_tenant_sessions(
     tenant_id: str,
     x_stc_admin_secret: str = Header(None),
 ):
     _require_admin(x_stc_admin_secret)
 
+    _get_tenant_meta_or_404(tenant_id)
+
+    index_key = tenant_session_index_key(tenant_id)
+    sids = _r.smembers(index_key)
+
     sessions = []
 
-    for key in _r.scan_iter(f"ztr:tenant:{tenant_id}:session:*"):
-        sid = key.split(":")[-1]
-        data = _r.hgetall(key)
+    for sid in list(sids):
+        session_key = tenant_session_key(tenant_id, sid)
+
+        data = _r.hgetall(session_key)
+        ttl = _r.ttl(session_key)
+
+        if not data or ttl <= 0:
+            _r.srem(index_key, sid)
+            continue
+
+        issued_at = int(data.get("issued_at", 0) or 0)
+        scopes = _parse_scopes(data.get("scopes", "[]"))
 
         sessions.append({
             "session_id": sid,
             "principal": data.get("principal"),
             "intent": data.get("intent"),
-            "issued": data.get("issued_at"),
-            "ttl": data.get("ttl")
+            "scopes": scopes,
+            "issued_at": issued_at,
+            "ttl": ttl,
         })
 
-    return {"sessions": sessions}
+    sessions.sort(key=lambda s: s.get("issued_at") or 0, reverse=True)
+
+    return {
+        "tenant_id": tenant_id,
+        "sessions": sessions,
+    }
 
 
 # ---------------------------------------------------------
-# GET /v1/admin/tenants/{tenant_id}/usage
-# Tenant usage metrics
+# GET /v1/admin/tenants/{tenant_id}/billing
+# Runtime-derived deterministic billing preview
 # ---------------------------------------------------------
 
 
-@admin_router.get("/tenants/{tenant_id}/usage")
-def tenant_usage(
+@admin_router.get("/tenants/{tenant_id}/billing")
+def get_tenant_billing(
     tenant_id: str,
     x_stc_admin_secret: str = Header(None),
 ):
     _require_admin(x_stc_admin_secret)
 
-    tokens_issued = 0
-    policy_denied = 0
-    sessions_revoked = 0
+    _get_tenant_meta_or_404(tenant_id)
 
-    for key in _r.scan_iter("metrics:decision:*"):
-        data = _r.hgetall(key)
+    period = current_period()
+    usage_key = tenant_usage_key(tenant_id, period)
 
-        if not data:
-            continue
+    usage = _r.hgetall(usage_key) or {}
 
-        if data.get("tenant_id") != tenant_id:
-            continue
-
-        tokens_issued += 1
-
-        if data.get("decision") == "deny":
-            policy_denied += 1
-
-    for key in _r.scan_iter(f"ztr:tenant:{tenant_id}:session:*"):
-        data = _r.hgetall(key)
-
-        if data.get("revoked") == "true":
-            sessions_revoked += 1
+    quantity = int(usage.get("tokens_issued") or 0)
+    unit_price_cents = TOKEN_PRICE_CENTS
+    amount_cents = quantity * unit_price_cents
 
     return {
         "tenant_id": tenant_id,
-        "tokens_issued": tokens_issued,
-        "policy_denied": policy_denied,
-        "sessions_revoked": sessions_revoked,
-        "period": current_period()
+        "period": period,
+        "billable_metric": "tokens_issued",
+        "unit_price_cents": unit_price_cents,
+        "quantity": quantity,
+        "amount_cents": amount_cents,
+    }
+
+# ---------------------------------------------------------
+# POST /v1/admin/tenants/{tenant_id}/repair
+# Backfill missing control-plane registry + projected state
+# for legacy tenants created before registry sync enforcement
+# ---------------------------------------------------------
+
+
+@admin_router.post("/tenants/{tenant_id}/repair")
+def repair_tenant_registry(
+    tenant_id: str,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    meta = _get_tenant_meta_or_404(tenant_id)
+
+    now = int(time.time())
+    created_at = int(meta.get("created_at") or now)
+    label = meta.get("label") or tenant_id
+
+    status_key = f"ztr:tenant:{tenant_id}:status"
+    config_key = f"ztr:tenant:{tenant_id}:config"
+    policy_key = f"ztr:tenant:{tenant_id}:policy"
+    registry_key = f"ztr:control:tenant:{tenant_id}"
+
+    status = _r.get(status_key) or "active"
+    policy_version = _read_policy_version(tenant_id)
+    policy_digest = hashlib.sha256(policy_version.encode()).hexdigest()
+
+    # Backfill / refresh control-plane registry
+    _r.hset(registry_key, mapping={
+        "tenant_id": tenant_id,
+        "status": status,
+        "created_at": created_at,
+        "policy_version": policy_version,
+        "policy_digest": policy_digest,
+        "last_updated": now
+    })
+
+    # Ensure projected state exists without disturbing existing usage/sessions
+    if not _r.exists(status_key):
+        _r.set(status_key, status)
+
+    if not _r.exists(config_key):
+        _r.set(
+            config_key,
+            json.dumps({
+                "version": policy_version,
+                "created_at": created_at
+            })
+        )
+
+    if _r.type(policy_key) != "hash":
+        _r.hset(
+            policy_key,
+            mapping={
+                "version": policy_version,
+                "digest": policy_digest
+            }
+        )
+
+    _write_policy_anchor(tenant_id, policy_version)
+
+    usage_key = tenant_usage_key(tenant_id, current_period())
+    if not _r.exists(usage_key):
+        _r.hset(
+            usage_key,
+            mapping={
+                "tokens_issued": 0,
+                "policy_denied": 0,
+                "sessions_revoked": 0
+            }
+        )
+
+    emit_event(
+        tenant_id=tenant_id,
+        event_type="control_plane.tenant_registry_repaired",
+        service="ztr-admin",
+        payload={
+            "tenant_id": tenant_id,
+            "label": label,
+            "status": status,
+            "policy_version": policy_version,
+            "policy_digest": policy_digest,
+            "timestamp": now
+        }
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "status": "repaired",
+        "registry_status": "synced",
+        "policy_version": policy_version,
+        "policy_digest": policy_digest
+    }
+
+# ---------------------------------------------------------
+# POST /v1/admin/tenants
+# One-call tenant provisioning endpoint
+# ---------------------------------------------------------
+
+
+@admin_router.post("/tenants")
+def create_tenant(
+    payload: ProvisionTenantRequest,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    tenant_id = payload.tenant_id
+    label = payload.label
+    key_label = payload.key_label
+
+    meta_key = f"ztr:tenant:{tenant_id}:meta"
+
+    if _r.exists(meta_key):
+        raise HTTPException(status_code=409, detail="tenant_already_exists")
+
+    now = int(time.time())
+
+    _r.set(meta_key, json.dumps({
+        "tenant_id": tenant_id,
+        "label": label,
+        "created_at": now
+    }))
+
+    # 🔒 CONTROL PLANE REGISTRY SYNC (CRITICAL FIX)
+    registry_key = f"ztr:control:tenant:{tenant_id}"
+
+    _r.hset(registry_key, mapping={
+        "tenant_id": tenant_id,
+        "status": "active",
+        "created_at": now,
+        "policy_version": POLICY_REVISION,
+        "policy_digest": hashlib.sha256(POLICY_REVISION.encode()).hexdigest(),
+        "last_updated": now
+    })
+
+    _r.set(f"ztr:tenant:{tenant_id}:status", "active")
+
+    _r.set(
+        f"ztr:tenant:{tenant_id}:config",
+        json.dumps({
+            "version": POLICY_REVISION,
+            "created_at": now
+        })
+    )
+
+    _r.hset(
+        f"ztr:tenant:{tenant_id}:policy",
+        mapping={
+            "version": POLICY_REVISION,
+            "digest": hashlib.sha256(POLICY_REVISION.encode()).hexdigest()
+        }
+    )
+
+    _write_policy_anchor(tenant_id, POLICY_REVISION)
+
+    _r.hset(
+        tenant_usage_key(tenant_id, current_period()),
+        mapping={
+            "tokens_issued": 0,
+            "policy_denied": 0,
+            "sessions_revoked": 0
+        }
+    )
+
+    _mgmt_emit(
+        "tenant.created",
+        {
+            "tenant_id": tenant_id,
+            "label": label,
+            "key_label": key_label,
+            "timestamp": now
+        }
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "status": "created"
+    }
+
+
+# =========================================================
+# 🔒 PHASE 8 — API KEY PROVISIONING (TENANT BINDING)
+# =========================================================
+
+@admin_router.post("/api-keys/create")
+def create_api_key(
+    payload: dict,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    tenant_id = payload.get("tenant_id")
+
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="missing_tenant_id")
+
+    # 🔒 VERIFY TENANT EXISTS (CONTROL PLANE SOURCE)
+    registry_key = f"ztr:control:tenant:{tenant_id}"
+
+    if not _r.exists(registry_key):
+        raise HTTPException(status_code=404, detail="tenant_not_found")
+
+    # 🔒 GENERATE SECURE API KEY
+    raw_key = f"stc_{secrets.token_urlsafe(32)}"
+
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+
+    lookup_key = apikey_lookup_key(key_hash)
+
+    # 🔒 STORE HASH → TENANT MAPPING
+    _r.set(lookup_key, tenant_id)
+
+    # 🔒 AUDIT EVENT (SOC2)
+    emit_event(
+        tenant_id=tenant_id,
+        event_type="control_plane.api_key_created",
+        service="admin",
+        payload={
+            "key_hash": key_hash[:12],
+            "timestamp": int(time.time())
+        }
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "api_key": raw_key
+    }
+
+# =========================================================
+# 🔒 PHASE 8 — API KEY REVOCATION
+# =========================================================
+
+@admin_router.post("/api-keys/revoke")
+def revoke_api_key(
+    payload: dict,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    key = payload.get("api_key")
+
+    if not key:
+        raise HTTPException(status_code=400, detail="missing_api_key")
+
+    key_hash = hashlib.sha256(key.encode()).hexdigest()
+    lookup_key = apikey_lookup_key(key_hash)
+
+    tenant_id = _r.get(lookup_key)
+
+    if not tenant_id:
+        raise HTTPException(status_code=404, detail="api_key_not_found")
+
+    _r.delete(lookup_key)
+
+    # 🔒 AUDIT EVENT
+    emit_event(
+        tenant_id=tenant_id,
+        event_type="control_plane.api_key_revoked",
+        service="admin",
+        payload={
+            "key_hash": key_hash[:12],
+            "timestamp": int(time.time())
+        }
+    )
+
+    return {
+        "status": "revoked",
+        "tenant_id": tenant_id
+    }
+
+# =========================================================
+# 🔒 PHASE 8 — API KEY ROTATION
+# =========================================================
+
+@admin_router.post("/api-keys/rotate")
+def rotate_api_key(
+    payload: dict,
+    x_stc_admin_secret: str = Header(None),
+):
+    _require_admin(x_stc_admin_secret)
+
+    old_key = payload.get("api_key")
+
+    if not old_key:
+        raise HTTPException(status_code=400, detail="missing_api_key")
+
+    old_hash = hashlib.sha256(old_key.encode()).hexdigest()
+    old_lookup = apikey_lookup_key(old_hash)
+
+    tenant_id = _r.get(old_lookup)
+
+    if not tenant_id:
+        raise HTTPException(status_code=404, detail="api_key_not_found")
+
+    # 🔒 REVOKE OLD KEY
+    _r.delete(old_lookup)
+
+    # 🔒 CREATE NEW KEY
+    new_key = f"stc_{secrets.token_urlsafe(32)}"
+    new_hash = hashlib.sha256(new_key.encode()).hexdigest()
+    new_lookup = apikey_lookup_key(new_hash)
+
+    _r.set(new_lookup, tenant_id)
+
+    # 🔒 AUDIT EVENT
+    emit_event(
+        tenant_id=tenant_id,
+        event_type="control_plane.api_key_rotated",
+        service="admin",
+        payload={
+            "old_key_hash": old_hash[:12],
+            "new_key_hash": new_hash[:12],
+            "timestamp": int(time.time())
+        }
+    )
+
+    return {
+        "tenant_id": tenant_id,
+        "api_key": new_key
     }

@@ -17,3 +17,8 @@ ztr-redis-config/
 # Logs
 *.log
 bundle.tar.gz
+audit_keys_backup.txt
+audit_verify_live.json
+runtime_integrity_live.json
+.wrangler/
+.pytest_cache/

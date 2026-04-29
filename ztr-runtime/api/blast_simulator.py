@@ -71,6 +71,8 @@ def compute_riskdna(
         "identity_store"
     }
 
+    context = context or {}
+
     # -----------------------------------------------------
     # TOPOLOGY RISK (blast radius)
     # -----------------------------------------------------
@@ -96,9 +98,21 @@ def compute_riskdna(
     policy_risk = 15 if policy_drift else 0
 
     # -----------------------------------------------------
-    # ENVIRONMENT RISK
+    # INPUT / ENVIRONMENT RISK
     # -----------------------------------------------------
-    environment_risk = 0
+    submitted_risk_score = context.get("risk_score", 0)
+
+    try:
+        submitted_risk_score = int(float(submitted_risk_score))
+    except Exception:
+        submitted_risk_score = 0
+
+    if submitted_risk_score < 0:
+        submitted_risk_score = 0
+
+    input_risk = min(submitted_risk_score, 30)
+
+    environment_risk = input_risk
 
     if context.get("after_hours"):
         environment_risk += 20
@@ -107,8 +121,20 @@ def compute_riskdna(
         environment_risk += 30
 
     velocity = context.get("velocity", 0)
+    try:
+        velocity = float(velocity)
+    except Exception:
+        velocity = 0
+
     if velocity > 5:
         environment_risk += 15
+
+    if context.get("device_trust") is False:
+        environment_risk += 10
+
+    session_binding = context.get("session_binding")
+    if session_binding is False or session_binding in ("", None):
+        environment_risk += 10
 
     # -----------------------------------------------------
     # FINAL SCORE
@@ -139,10 +165,11 @@ def compute_riskdna(
         "topology_risk": topology_risk,
         "policy_risk": policy_risk,
         "environment_risk": environment_risk,
+        "input_risk": input_risk,
+        "submitted_risk_score": submitted_risk_score,
         "final_score": final_score,
         "risk_tier": tier
     }
-
 
 # ---------------------------------------------------------
 # Optional helper for debugging / logging

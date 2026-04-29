@@ -29,27 +29,18 @@ from typing import Any, Dict, Optional
 import redis
 from redis.exceptions import WatchError
 
-# ---------------------------------------------------------
-# Configuration (frozen)
-# ---------------------------------------------------------
 SCHEMA_VERSION = "stc.audit.v1"
 DEFAULT_ENV    = os.getenv("APP_ENV", "prod")
 GENESIS_HASH   = os.getenv("AUDIT_CHAIN_GENESIS", "0" * 64)
 REDIS_URL      = os.environ["REDIS_URL"]
 
-# ---------------------------------------------------------
-# Redis client (frozen)
-# ---------------------------------------------------------
 _audit_redis = redis.from_url(REDIS_URL, decode_responses=True)
 _LOCK = threading.Lock()
 
+STRICT_SCHEMA = True
 
-# ---------------------------------------------------------
-# Phase 5A-01 — tenant-scoped key builder
-# Replaces the four global key constants from Phase 4.
-# ---------------------------------------------------------
+
 def _keys(tenant_id: str) -> dict:
-    """Return all Redis key strings scoped to this tenant."""
     return {
         "head":         f"ztr:{tenant_id}:audit:head",
         "index_all":    f"ztr:{tenant_id}:audit:index:all",
@@ -58,9 +49,6 @@ def _keys(tenant_id: str) -> dict:
     }
 
 
-# ---------------------------------------------------------
-# Hashing helpers (frozen — Phase 4)
-# ---------------------------------------------------------
 def _canonical(obj: Any) -> str:
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -69,11 +57,6 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------
-# emit_event — Phase 5A-01: added tenant_id param
-# Everything else frozen (WatchError loop, envelope shape,
-# hash computation order).
-# ---------------------------------------------------------
 def emit_event(
     *,
     event_type: str,
@@ -83,9 +66,8 @@ def emit_event(
     correlation_id: Optional[str] = None,
     env: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Append an audit event to the tenant-scoped tamper-evident hash chain.
-    """
+
+    print("AUDIT_CHAIN_VERSION: TENANT MODE ACTIVE", flush=True)
 
     if not event_type:
         raise ValueError("event_type required")
@@ -96,18 +78,22 @@ def emit_event(
     if not tenant_id:
         raise ValueError("tenant_id required")
 
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("tenant_id must be non-empty string")
+
     env = env or DEFAULT_ENV
     k   = _keys(tenant_id)
 
     base_event = {
-        "schema":         SCHEMA_VERSION,
-        "event_id":       str(uuid.uuid4()),
-        "event_type":     event_type,
-        "ts_ms":          int(time.time() * 1000),
-        "service":        service,
-        "env":            env,
+        "schema": SCHEMA_VERSION,
+        "event_id": str(uuid.uuid4()),
+        "tenant_id": tenant_id,
+        "event_type": event_type,
+        "ts_ms": int(time.time() * 1000),
+        "service": service,
+        "env": env,
         "correlation_id": correlation_id,
-        "payload":        payload,
+        "payload": payload,
     }
 
     for _ in range(5):
@@ -139,13 +125,7 @@ def emit_event(
     raise RuntimeError("audit_chain_append_failed")
 
 
-# ---------------------------------------------------------
-# get_entry — Phase 5A-01: added tenant_id param
-# ---------------------------------------------------------
-def get_entry(
-    event_hash: str,
-    tenant_id: str,
-) -> Optional[Dict[str, Any]]:
+def get_entry(event_hash: str, tenant_id: str) -> Optional[Dict[str, Any]]:
 
     k   = _keys(tenant_id)
     raw = _audit_redis.get(k["entry_prefix"] + event_hash)
@@ -156,14 +136,7 @@ def get_entry(
     return json.loads(raw)
 
 
-# ---------------------------------------------------------
-# list_index — Phase 5A-01: added tenant_id param
-# ---------------------------------------------------------
-def list_index(
-    tenant_id: str,
-    event_type: str = "all",
-    limit: int = 50,
-) -> list[str]:
+def list_index(tenant_id: str, event_type: str = "all", limit: int = 50) -> list[str]:
 
     k = _keys(tenant_id)
 
@@ -183,14 +156,7 @@ def list_index(
     return list(reversed(hashes))
 
 
-# ---------------------------------------------------------
-# verify_chain — Phase 5A-01: added tenant_id param
-# Hash verification logic frozen (Phase 4).
-# ---------------------------------------------------------
-def verify_chain(
-    tenant_id: str,
-    limit: int = 5000,
-) -> Dict[str, Any]:
+def verify_chain(tenant_id: str, limit: int = 5000) -> Dict[str, Any]:
 
     k     = _keys(tenant_id)
     total = _audit_redis.llen(k["index_all"])
@@ -212,6 +178,24 @@ def verify_chain(
                 "status": "broken",
                 "reason": "missing_entry",
                 "event_hash": h,
+            }
+
+        if entry.get("tenant_id") != tenant_id:
+            return {
+                "status": "broken",
+                "reason": "tenant_mismatch",
+                "event_hash": h,
+                "expected_tenant": tenant_id,
+                "found_tenant": entry.get("tenant_id"),
+            }
+
+        if STRICT_SCHEMA and entry.get("schema") != SCHEMA_VERSION:
+            return {
+                "status": "broken",
+                "reason": "schema_mismatch",
+                "event_hash": h,
+                "expected_schema": SCHEMA_VERSION,
+                "found_schema": entry.get("schema"),
             }
 
         if entry.get("prev_hash") != prev_hash:
@@ -241,18 +225,17 @@ def verify_chain(
 
     return {
         "status": "valid",
+        "tenant_id": tenant_id,
+        "schema": SCHEMA_VERSION,
         "events_verified": len(hashes),
         "chain_head": prev_hash,
+        "verified_at": int(time.time() * 1000),
     }
 
 
 def get_latest_event(tenant_id: str, event_type: str):
-    """
-    Return the most recent event of a given type for a tenant.
-    Used by runtime integrity checks.
-    """
 
-    pattern = f"audit:{tenant_id}:*"
+    pattern = f"ztr:{tenant_id}:audit:entry:*"
 
     latest = None
     latest_ts = 0

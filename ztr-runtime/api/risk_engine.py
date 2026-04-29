@@ -45,6 +45,15 @@ def compute_risk_score(tenant_id: str, principal: str):
         + deny_events * DENY_PENALTY
     )
 
+    # 🔒 INTEGRITY PENALTY
+    try:
+        integrity_score = int(r.get("runtime:integrity_score") or 100)
+    except:
+        integrity_score = 100
+
+    if integrity_score < 80:
+        score += (80 - integrity_score)
+
     return {
         "risk_score": score,
         "tenant_risk": tenant_risk,

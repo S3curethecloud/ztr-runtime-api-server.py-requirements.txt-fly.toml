@@ -10,6 +10,8 @@ def test_token_issue():
     payload = {
         "principal": "agent-demo",
         "intent": "refund:create",
+            "scopes": ["refund:create"],
+            "ttl_seconds": 300,
         "context": {
             "tenant_id": "tenant-test"
         }
@@ -31,6 +33,8 @@ def test_token_revocation():
     payload = {
         "principal": "agent-demo",
         "intent": "refund:create",
+            "scopes": ["refund:create"],
+            "ttl_seconds": 300,
         "context": {
             "tenant_id": "tenant-test"
         }
@@ -53,6 +57,8 @@ def test_revoked_token_rejected():
     payload = {
         "principal": "agent-demo",
         "intent": "refund:create",
+            "scopes": ["refund:create"],
+            "ttl_seconds": 300,
         "context": {
             "tenant_id": "tenant-test"
         }
@@ -69,4 +75,7 @@ def test_revoked_token_rejected():
         json={"token": issue["token"]}
     )
 
-    assert check.status_code == 401
+    assert check.status_code == 200
+    data = check.json()
+    assert data["active"] is False
+    assert data["reason"] == "inactive"
