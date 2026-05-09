@@ -43,6 +43,29 @@ deny_aegis if {
 }
 
 # --------------------------------------------------
+# AEGIS IDENTITY INTEGRITY HANDLING
+# --------------------------------------------------
+
+aegis_identity_present if {
+    input.context.aegis_identity
+}
+
+identity_drift_detected if {
+    aegis_identity_present
+    input.context.aegis_identity.signal == "IDENTITY_DRIFT_DETECTED"
+}
+
+identity_high_modifier if {
+    aegis_identity_present
+    input.context.aegis_identity.risk_modifier >= 20
+}
+
+deny_identity_integrity if {
+    identity_drift_detected
+    identity_high_modifier
+}
+
+# --------------------------------------------------
 # CORE VALIDATIONS
 # --------------------------------------------------
 
@@ -110,6 +133,7 @@ high_risk if {
 
 allow if {
     not deny_aegis
+    not deny_identity_integrity
     valid_principal
     valid_tenant
     valid_intent

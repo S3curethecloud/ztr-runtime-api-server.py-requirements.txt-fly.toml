@@ -95,6 +95,15 @@ def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _build_actor_context(operator_id: Optional[str]) -> dict:
+    actor_id = (operator_id or "operator").strip() or "operator"
+    return {
+        "actor_type": "operator",
+        "actor_id": actor_id,
+        "actor_origin": "control_plane",
+    }
+
+
 def current_period() -> str:
     return datetime.datetime.utcnow().strftime("%Y-%m")
 
@@ -353,6 +362,52 @@ def get_tenant_summary(
 # ---------------------------------------------------------
 
 
+def get_tenant_risk_snapshot(tenant_id: str, window_seconds: int = 900) -> int:
+    max_risk = 0
+    cutoff_ms = (int(time.time()) - window_seconds) * 1000
+
+    # active sessions
+    index_key = tenant_session_index_key(tenant_id)
+    sids = _r.smembers(index_key)
+
+    for sid in list(sids):
+        session_key = tenant_session_key(tenant_id, sid)
+        data = _r.hgetall(session_key)
+        ttl = _r.ttl(session_key)
+
+        if not data or ttl <= 0:
+            _r.srem(index_key, sid)
+            continue
+
+        try:
+            risk = json.loads(data.get("risk") or "{}")
+            max_risk = max(max_risk, int(risk.get("final_score") or 0))
+        except Exception:
+            continue
+
+    # recent audit / deny pressure
+    pattern = f"ztr:{tenant_id}:audit:entry:*"
+
+    for key in _r.scan_iter(pattern):
+        try:
+            raw = _r.get(key)
+            if not raw:
+                continue
+
+            entry = json.loads(raw)
+            ts_ms = int(entry.get("ts_ms") or 0)
+            if ts_ms < cutoff_ms:
+                continue
+
+            payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+            event_risk = int(payload.get("risk_score") or entry.get("risk_score") or 0)
+            max_risk = max(max_risk, event_risk)
+        except Exception:
+            continue
+
+    return max_risk
+
+
 @admin_router.get("/tenants/{tenant_id}/usage")
 def get_tenant_usage(
     tenant_id: str,
@@ -366,45 +421,12 @@ def get_tenant_usage(
     usage_key = tenant_usage_key(tenant_id, period)
     usage = _r.hgetall(usage_key) or {}
 
-    index_key = tenant_session_index_key(tenant_id)
-    sids = _r.smembers(index_key)
-
-    risk_score = 0
-
-    for sid in list(sids):
-        session_key = tenant_session_key(tenant_id, sid)
-
-        data = _r.hgetall(session_key)
-        ttl = _r.ttl(session_key)
-
-        if not data or ttl <= 0:
-            _r.srem(index_key, sid)
-            continue
-
-        raw_risk = data.get("risk", "null")
-
-        try:
-            risk = json.loads(raw_risk)
-        except Exception:
-            risk = {}
-
-        if not isinstance(risk, dict):
-            risk = {}
-
-        try:
-            score = int(float(risk.get("final_score") or 0))
-        except Exception:
-            score = 0
-
-        if score > risk_score:
-            risk_score = score
-
     return {
         "tenant_id": tenant_id,
         "tokens_issued": int(usage.get("tokens_issued") or 0),
         "policy_denied": int(usage.get("policy_denied") or 0),
         "sessions_revoked": int(usage.get("sessions_revoked") or 0),
-        "risk_score": risk_score,
+        "risk_score": get_tenant_risk_snapshot(tenant_id),
         "period": period,
     }
 
@@ -501,6 +523,7 @@ def get_tenant_billing(
 def repair_tenant_registry(
     tenant_id: str,
     x_stc_admin_secret: str = Header(None),
+    x_stc_operator: str = Header(None),
 ):
     _require_admin(x_stc_admin_secret)
 
@@ -574,7 +597,8 @@ def repair_tenant_registry(
             "status": status,
             "policy_version": policy_version,
             "policy_digest": policy_digest,
-            "timestamp": now
+            "timestamp": now,
+            **_build_actor_context(x_stc_operator),
         }
     )
 
@@ -596,6 +620,7 @@ def repair_tenant_registry(
 def create_tenant(
     payload: ProvisionTenantRequest,
     x_stc_admin_secret: str = Header(None),
+    x_stc_operator: str = Header(None),
 ):
     _require_admin(x_stc_admin_secret)
 
@@ -663,7 +688,8 @@ def create_tenant(
             "tenant_id": tenant_id,
             "label": label,
             "key_label": key_label,
-            "timestamp": now
+            "timestamp": now,
+            **_build_actor_context(x_stc_operator),
         }
     )
 
@@ -681,6 +707,7 @@ def create_tenant(
 def create_api_key(
     payload: dict,
     x_stc_admin_secret: str = Header(None),
+    x_stc_operator: str = Header(None),
 ):
     _require_admin(x_stc_admin_secret)
 
@@ -712,7 +739,8 @@ def create_api_key(
         service="admin",
         payload={
             "key_hash": key_hash[:12],
-            "timestamp": int(time.time())
+            "timestamp": int(time.time()),
+            **_build_actor_context(x_stc_operator),
         }
     )
 
@@ -729,6 +757,7 @@ def create_api_key(
 def revoke_api_key(
     payload: dict,
     x_stc_admin_secret: str = Header(None),
+    x_stc_operator: str = Header(None),
 ):
     _require_admin(x_stc_admin_secret)
 
@@ -754,7 +783,8 @@ def revoke_api_key(
         service="admin",
         payload={
             "key_hash": key_hash[:12],
-            "timestamp": int(time.time())
+            "timestamp": int(time.time()),
+            **_build_actor_context(x_stc_operator),
         }
     )
 
@@ -771,6 +801,7 @@ def revoke_api_key(
 def rotate_api_key(
     payload: dict,
     x_stc_admin_secret: str = Header(None),
+    x_stc_operator: str = Header(None),
 ):
     _require_admin(x_stc_admin_secret)
 
@@ -805,7 +836,8 @@ def rotate_api_key(
         payload={
             "old_key_hash": old_hash[:12],
             "new_key_hash": new_hash[:12],
-            "timestamp": int(time.time())
+            "timestamp": int(time.time()),
+            **_build_actor_context(x_stc_operator),
         }
     )
 

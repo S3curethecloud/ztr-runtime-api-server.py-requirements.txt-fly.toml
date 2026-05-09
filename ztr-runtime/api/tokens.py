@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from api.models import TokenIssueRequest
@@ -18,6 +18,7 @@ from runtime_identity import get_node_id
 from api.blast_simulator import simulate_blast_radius, compute_riskdna
 
 from core.schema import prepare_decision_event, SchemaValidationError
+from core.aegis_identity.service import evaluate_identity_integrity
 
 import uuid
 import redis
@@ -167,6 +168,23 @@ def current_period() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
 
 
+def _build_runtime_actor_context(operator_id: str, principal: str) -> dict:
+    normalized_operator = (operator_id or "").strip()
+
+    if normalized_operator:
+        return {
+            "actor_type": "operator",
+            "actor_id": normalized_operator,
+            "actor_origin": "runtime_console",
+        }
+
+    return {
+        "actor_type": "principal",
+        "actor_id": principal or "unknown",
+        "actor_origin": "runtime_api",
+    }
+
+
 def increment_tenant_usage(tenant_id: str, field: str, amount: int = 1):
     usage_key = tenant_usage_key(tenant_id, current_period())
 
@@ -231,10 +249,51 @@ def apply_policy_override(tenant_id, principal, policy_input):
     return policy_input
 
 
+def get_recent_tenant_denials(tenant_id: str, window_seconds: int = 900) -> int:
+    cutoff_ms = (int(time.time()) - window_seconds) * 1000
+    count = 0
+
+    pattern = f"ztr:{tenant_id}:audit:entry:*"
+
+    for key in r.scan_iter(pattern):
+        try:
+            raw = r.get(key)
+            if not raw:
+                continue
+
+            entry = json.loads(raw)
+            ts_ms = int(entry.get("ts_ms") or 0)
+            if ts_ms < cutoff_ms:
+                continue
+
+            event_type = str(entry.get("event_type") or "").lower()
+            payload = entry.get("payload") if isinstance(entry.get("payload"), dict) else {}
+            reason = str(payload.get("reason") or entry.get("reason") or "").lower()
+            decision = str(payload.get("decision") or entry.get("decision") or "").lower()
+
+            if (
+                event_type == "runtime.token_denied"
+                or decision == "deny"
+                or reason == "policy_denied"
+                or reason == "obligation_denied"
+            ):
+                count += 1
+        except Exception:
+            continue
+
+    return count
+
+
+def has_policy_drift(tenant_id: str, principal: str) -> bool:
+    key = f"ztr:{tenant_id}:policy_override:{principal}"
+    return bool(r.get(key))
+
+
 @tokens_router.post("/tokens/issue")
 async def issue_token(
     req: TokenIssueRequest,
     tenant_id: str = Depends(require_tenant_api_key),
+    x_stc_operator: str = Header(None),
 ):
     try:
         now = int(time.time())
@@ -248,17 +307,35 @@ async def issue_token(
 
         nodes = simulate_blast_radius(req.principal, req.intent, graph)
 
+        recent_denials = get_recent_tenant_denials(tenant_id, window_seconds=900)
+        policy_drift = has_policy_drift(tenant_id, req.principal)
+
         riskdna = compute_riskdna(
             principal=req.principal,
             intent=req.intent,
             nodes=nodes,
             context=req.context or {},
-            recent_denials=0,
-            policy_drift=False
+            recent_denials=recent_denials,
+            policy_drift=policy_drift
         )
 
         context = req.context or {}
-        context["risk_score"] = riskdna["final_score"]
+
+        identity_signal = evaluate_identity_integrity(
+            redis_client=r,
+            tenant_id=tenant_id,
+            principal=req.principal,
+            intent=req.intent,
+            scopes=req.scopes,
+            context=context,
+            recent_denials=recent_denials,
+            policy_drift=policy_drift,
+        )
+
+        context["aegis_identity"] = identity_signal
+        context["risk_score"] = riskdna["final_score"] + int(
+            identity_signal.get("risk_modifier", 0)
+        )
 
         policy_input = {
             "tenant_id": tenant_id,
@@ -288,7 +365,7 @@ async def issue_token(
                 "principal": req.principal,
                 "intent": req.intent,
                 "decision": "deny",
-                "risk_score": riskdna["final_score"],
+                "risk_score": context["risk_score"],
                 "policy_revision": POLICY_REVISION,
                 "metadata": {
                     "source": "tokens",
@@ -314,11 +391,12 @@ async def issue_token(
                 payload={
                     "principal": req.principal,
                     "intent": req.intent,
-                    "risk_score": riskdna["final_score"],
+                    "risk_score": context["risk_score"],
                     "policy_revision": POLICY_REVISION,
                     "node_id": NODE_ID,
                     "decision": "deny",
                     "reason": "policy_denied",
+                    **_build_runtime_actor_context(x_stc_operator, req.principal),
                 }
             )
 
@@ -338,7 +416,7 @@ async def issue_token(
                 "principal": req.principal,
                 "intent": req.intent,
                 "decision": "deny",
-                "risk_score": riskdna["final_score"],
+                "risk_score": context["risk_score"],
                 "policy_revision": POLICY_REVISION,
                 "metadata": {
                     "source": "tokens",
@@ -362,11 +440,12 @@ async def issue_token(
                 payload={
                     "principal": req.principal,
                     "intent": req.intent,
-                    "risk_score": riskdna["final_score"],
+                    "risk_score": context["risk_score"],
                     "policy_revision": POLICY_REVISION,
                     "node_id": NODE_ID,
                     "decision": "deny",
                     "reason": "obligation_denied",
+                    **_build_runtime_actor_context(x_stc_operator, req.principal),
                 }
             )
 
@@ -391,7 +470,11 @@ async def issue_token(
             "scopes": json.dumps(req.scopes),
             "issued_at": str(now),
             "ttl": str(effective_ttl),
-            "risk": json.dumps(riskdna),
+            "risk": json.dumps({
+                **riskdna,
+                "identity_integrity": identity_signal,
+                "final_score": context["risk_score"],
+            }),
             "policy_revision": POLICY_REVISION,
             "obligations": json.dumps(obligations),
             "decision": "allow"
@@ -432,7 +515,7 @@ async def issue_token(
             "principal": req.principal,
             "intent": req.intent,
             "decision": "allow",
-            "risk_score": riskdna["final_score"],
+            "risk_score": context["risk_score"],
             "policy_revision": POLICY_REVISION,
             "metadata": {
                 "source": "tokens",
@@ -461,10 +544,11 @@ async def issue_token(
                 "intent": req.intent,
                 "session_id": sid,
                 "scopes": req.scopes,
-                "risk_score": riskdna["final_score"],
+                "risk_score": context["risk_score"],
                 "policy_revision": POLICY_REVISION,
                 "node_id": NODE_ID,
                 "decision": "allow",
+                **_build_runtime_actor_context(x_stc_operator, req.principal),
             }
         )
 
