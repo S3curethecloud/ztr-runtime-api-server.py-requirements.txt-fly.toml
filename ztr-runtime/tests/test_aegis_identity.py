@@ -266,3 +266,37 @@ def test_opa_does_not_deny_stable_identity_signal() -> None:
 
     assert signal["risk_modifier"] == 0
     assert _policy_denies_identity_integrity(signal) is False
+
+
+def test_passrole_lab_maps_to_aegis_identity_drift_signal() -> None:
+    signal = evaluate_identity_integrity(
+        redis_client=None,
+        tenant_id="tenant-beta",
+        principal="passrole-lab-principal",
+        intent="iam:PassRole",
+        scopes=["iam:PassRole"],
+        context={
+            "risk_score": 80,
+            "device_trust": True,
+            "session_binding": "passrole-lab-session",
+            "lab_id": "aws-privilege-escalation-passrole",
+            "linked_shield_finding": "shield-passrole-001",
+        },
+        recent_denials=3,
+        policy_drift=False,
+    )
+
+    assert signal["signal"] == "IDENTITY_DRIFT_DETECTED"
+    assert signal["risk_modifier"] >= 20
+    assert signal["decision_authority"] == "OPA"
+    assert signal["model"] == "aegis-identity-v0.1"
+    assert "risk_score:80" in signal["reasons"]
+    assert "recent_denials:3" in signal["reasons"]
+
+    # Aegis remains signal-only.
+    assert "allow" not in signal
+    assert "deny" not in signal
+    assert "authorized" not in signal
+    assert "token" not in signal
+    assert "session" not in signal
+
