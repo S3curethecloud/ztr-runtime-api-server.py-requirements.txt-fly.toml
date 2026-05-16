@@ -300,3 +300,36 @@ def test_passrole_lab_maps_to_aegis_identity_drift_signal() -> None:
     assert "token" not in signal
     assert "session" not in signal
 
+
+def test_cross_account_lab_maps_to_aegis_identity_drift_signal() -> None:
+    signal = evaluate_identity_integrity(
+        redis_client=None,
+        tenant_id="tenant-beta",
+        principal="cross-account-lab-principal",
+        intent="sts:AssumeRole",
+        scopes=["sts:AssumeRole"],
+        context={
+            "risk_score": 80,
+            "device_trust": True,
+            "session_binding": "cross-account-lab-session",
+            "lab_id": "aws-cross-account-role-escalation",
+            "linked_shield_finding": "shield-xacct-001",
+        },
+        recent_denials=3,
+        policy_drift=False,
+    )
+
+    assert signal["signal"] == "IDENTITY_DRIFT_DETECTED"
+    assert signal["risk_modifier"] >= 20
+    assert signal["decision_authority"] == "OPA"
+    assert signal["model"] == "aegis-identity-v0.1"
+    assert "risk_score:80" in signal["reasons"]
+    assert "recent_denials:3" in signal["reasons"]
+
+    # Aegis remains signal-only.
+    assert "allow" not in signal
+    assert "deny" not in signal
+    assert "authorized" not in signal
+    assert "token" not in signal
+    assert "session" not in signal
+

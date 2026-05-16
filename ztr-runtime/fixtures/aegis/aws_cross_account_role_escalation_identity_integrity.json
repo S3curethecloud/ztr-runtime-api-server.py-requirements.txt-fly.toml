@@ -1,0 +1,32 @@
+{
+  "lab_id": "aws-cross-account-role-escalation",
+  "linked_shield_finding": "shield-xacct-001",
+  "scenario": "cross_account_assume_role_escalation_path",
+  "expected_signal": "IDENTITY_DRIFT_DETECTED",
+  "expected_minimum_risk_modifier": 20,
+  "decision_authority": "OPA",
+  "request": {
+    "tenant_id": "tenant-beta",
+    "principal": "cross-account-lab-principal",
+    "intent": "sts:AssumeRole",
+    "scopes": [
+      "sts:AssumeRole"
+    ],
+    "context": {
+      "risk_score": 80,
+      "device_trust": true,
+      "session_binding": "cross-account-lab-session",
+      "lab_id": "aws-cross-account-role-escalation",
+      "linked_shield_finding": "shield-xacct-001"
+    },
+    "recent_denials": 3,
+    "policy_drift": false
+  },
+  "boundary": {
+    "aegis_signal_only": true,
+    "opa_decision_authority_preserved": true,
+    "runtime_authorization_granted": false,
+    "token_issued": false,
+    "session_created": false
+  }
+}
