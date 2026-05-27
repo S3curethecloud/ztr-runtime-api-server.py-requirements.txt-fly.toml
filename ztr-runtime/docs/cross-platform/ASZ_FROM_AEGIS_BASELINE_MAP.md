@@ -1,6 +1,6 @@
 # ASZ From Aegis Baseline Map
 
-Status: Agent 7 / Baseline Inheritance Mapping In Progress
+Status: Agent 7 / Evidence Recorded
 
 ## Purpose
 
@@ -55,3 +55,44 @@ Current conclusion
 ASZ inheritance from Aegis is not yet proven at the file-copy level.
 
 The main normalization requirement is to ensure ASZ remains a verification/assertion layer, not a runtime authorization or enforcement layer.
+
+
+## Agent 7 Evidence Record
+
+Status: Agent 7 Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+ae62832 — Record Aegis runtime Agent 1 evidence status
+ac6758e — Add Aegis runtime SOC 2 control alignment docs
+2e1195b — Record Aegis runtime Agent 2 evidence status
+a35869e — Add RiskDNA Aegis boundary alignment docs
+36239bf — Record RiskDNA Aegis alignment evidence status
+0215863 — Add Aegis baseline inheritance normalization docs
+
+Evidence inputs:
+
+docs/aegis/AEGIS_RUNTIME_INVENTORY.md
+docs/aegis/AEGIS_RUNTIME_OWNERSHIP_SPLIT.md
+docs/aegis/AEGIS_RUNTIME_DEPENDENCY_MAP.md
+docs/aegis/AEGIS_RUNTIME_BASELINE_EXPORTS_TO_OTHER_PLATFORMS.md
+docs/aegis/AEGIS_RUNTIME_RENDERED_VS_OWNED_SURFACES.md
+docs/riskdna/RISKDNA_AEGIS_BOUNDARY.md
+docs/riskdna/RISKDNA_RUNTIME_DEPENDENCY_CONTRACT.md
+docs/aegis/evidence/AEGIS_RUNTIME_ROUTE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_REDIS_STATE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_RISKDNA_AEGIS_OPA_FLOW_EVIDENCE.md
+
+Agent 7 exit position:
+
+ASZ, Blackbox, and Kubernetes/SENTINEL candidate inheritance from Aegis Runtime
+is now visible and normalized into explicit contract requirements.
+
+Copied-file inheritance is not claimed as final proof unless destination
+repository evidence is later recorded. Hidden inheritance assumptions are now
+blocked from becoming implicit authority transfers.
+
