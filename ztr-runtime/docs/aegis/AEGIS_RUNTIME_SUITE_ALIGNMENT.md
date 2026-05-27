@@ -1,6 +1,6 @@
 # Aegis Runtime Suite Alignment
 
-Status: Phase 1 / Agent 1 Suite Alignment Draft
+Status: Phase 1 / Agent 1 Evidence Recorded
 
 ## Purpose
 
@@ -70,4 +70,33 @@ docs/aegis/AEGIS_RUNTIME_INVENTORY.md
 docs/aegis/AEGIS_RUNTIME_OWNERSHIP_SPLIT.md
 docs/aegis/AEGIS_RUNTIME_DEPENDENCY_MAP.md
 docs/aegis/AEGIS_RUNTIME_RENDERED_VS_OWNED_SURFACES.md
+
+
+## Agent 1 Evidence Record
+
+Status: Agent 1 Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+
+Evidence files:
+
+docs/aegis/evidence/AEGIS_RUNTIME_ROUTE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_REDIS_STATE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_RISKDNA_AEGIS_OPA_FLOW_EVIDENCE.md
+
+Agent 1 exit position:
+
+Aegis Runtime inventory, ownership split, dependency map, suite alignment,
+rendered-vs-owned classification, baseline export candidate map, and initial
+SOC 2 alignment are now recorded with repository evidence.
+
+Remaining unresolved items are intentionally reserved for downstream agents:
+SOC 2 control ownership, RiskDNA/Aegis boundary hardening, cross-platform
+inheritance confirmation, SENTINEL re-baseline, Composition Layer readiness,
+Helm/package scope, and doctrine updates.
 

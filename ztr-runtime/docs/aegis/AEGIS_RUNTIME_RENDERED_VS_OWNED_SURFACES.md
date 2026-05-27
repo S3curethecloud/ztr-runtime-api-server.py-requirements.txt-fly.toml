@@ -1,7 +1,7 @@
 
 Aegis Runtime Rendered vs Owned Surfaces
 
-Status: Phase 1 / Agent 1 Rendered-vs-Owned Draft
+Status: Phase 1 / Agent 1 Evidence Recorded
 
 Purpose
 
@@ -80,3 +80,33 @@ Gate rule
 Aegis may inform, enrich, explain, and render bounded context.
 
 Aegis must not be treated as the system of record for enforcement, token issuance, session lifecycle, OPA decisions, tenant registry, or production control-plane authority.
+
+
+## Agent 1 Evidence Record
+
+Status: Agent 1 Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+
+Evidence files:
+
+docs/aegis/evidence/AEGIS_RUNTIME_ROUTE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_REDIS_STATE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_RISKDNA_AEGIS_OPA_FLOW_EVIDENCE.md
+
+Agent 1 exit position:
+
+Aegis Runtime inventory, ownership split, dependency map, suite alignment,
+rendered-vs-owned classification, baseline export candidate map, and initial
+SOC 2 alignment are now recorded with repository evidence.
+
+Remaining unresolved items are intentionally reserved for downstream agents:
+SOC 2 control ownership, RiskDNA/Aegis boundary hardening, cross-platform
+inheritance confirmation, SENTINEL re-baseline, Composition Layer readiness,
+Helm/package scope, and doctrine updates.
+
