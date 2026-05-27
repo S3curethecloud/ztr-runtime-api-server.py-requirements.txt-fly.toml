@@ -1,6 +1,6 @@
 # Aegis Runtime Packaging Reality
 
-Status: Agent 6 / Packaging Reality In Progress
+Status: Agent 6 / Evidence Recorded
 
 ## Purpose
 
@@ -116,3 +116,53 @@ Current conclusion
 Aegis Runtime packaging is documented as planning-ready but not implementation-ready.
 
 No Helm, suite, package, deployment, or production routing claim should be made until future evidence proves clean deploy boundaries.
+
+
+## Agent 6 Evidence Record
+
+Status: Agent 6 Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+ae62832 — Record Aegis runtime Agent 1 evidence status
+ac6758e — Add Aegis runtime SOC 2 control alignment docs
+2e1195b — Record Aegis runtime Agent 2 evidence status
+a35869e — Add RiskDNA Aegis boundary alignment docs
+36239bf — Record RiskDNA Aegis alignment evidence status
+0215863 — Add Aegis baseline inheritance normalization docs
+edc4276 — Record Aegis baseline inheritance evidence status
+801a0ed — Add SENTINEL Aegis integration rebaseline
+2918bf0 — Record SENTINEL Aegis rebaseline evidence status
+700215b — Add Aegis runtime composition baseline
+d6f2842 — Record Aegis runtime composition evidence status
+6a02bc8 — Add Aegis runtime packaging reality
+
+Evidence inputs:
+
+docs/aegis/AEGIS_RUNTIME_INVENTORY.md
+docs/aegis/AEGIS_RUNTIME_OWNERSHIP_SPLIT.md
+docs/aegis/AEGIS_RUNTIME_DEPENDENCY_MAP.md
+docs/aegis/AEGIS_RUNTIME_SUITE_ALIGNMENT.md
+docs/aegis/AEGIS_RUNTIME_RENDERED_VS_OWNED_SURFACES.md
+docs/aegis/AEGIS_RUNTIME_SYSTEM_BOUNDARY.md
+docs/riskdna/RISKDNA_AEGIS_BOUNDARY.md
+docs/riskdna/RISKDNA_RUNTIME_DEPENDENCY_CONTRACT.md
+docs/cross-platform/AEGIS_BASELINE_INHERITANCE_NORMALIZATION.md
+composition/AEGIS_RUNTIME_COMPOSITION_BASELINE.md
+sentinel/AEGIS_INTEGRATION_REBASELINE.md
+
+Agent 6 exit position:
+
+Aegis Runtime packaging reality is recorded.
+
+Aegis Runtime and RiskDNA have documented logical boundaries and planning-ready
+contracts, but they are not yet proven to be independently deployable packages,
+suite modules, Helm toggles, or production routing units.
+
+Future package or Helm claims require explicit interface contracts, deployment
+evidence, CI evidence, disable/enable behavior tests, and doctrine approval.
+
