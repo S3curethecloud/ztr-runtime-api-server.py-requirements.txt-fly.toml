@@ -1,6 +1,6 @@
 # Aegis Runtime Composition Baseline
 
-Status: Agent 5 / Composition Layer Baseline In Progress
+Status: Agent 5 / Evidence Recorded
 
 ## Purpose
 
@@ -88,3 +88,52 @@ Current conclusion
 The Composition Layer may consume this baseline as planning evidence.
 
 It must not convert Aegis Runtime into a clean package, suite, Helm toggle, or enforcement authority until future implementation and doctrine phases explicitly prove that decomposition.
+
+
+## Agent 5 Evidence Record
+
+Status: Agent 5 Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+ae62832 — Record Aegis runtime Agent 1 evidence status
+ac6758e — Add Aegis runtime SOC 2 control alignment docs
+2e1195b — Record Aegis runtime Agent 2 evidence status
+a35869e — Add RiskDNA Aegis boundary alignment docs
+36239bf — Record RiskDNA Aegis alignment evidence status
+0215863 — Add Aegis baseline inheritance normalization docs
+edc4276 — Record Aegis baseline inheritance evidence status
+801a0ed — Add SENTINEL Aegis integration rebaseline
+2918bf0 — Record SENTINEL Aegis rebaseline evidence status
+700215b — Add Aegis runtime composition baseline
+
+Evidence inputs:
+
+docs/aegis/AEGIS_RUNTIME_INVENTORY.md
+docs/aegis/AEGIS_RUNTIME_OWNERSHIP_SPLIT.md
+docs/aegis/AEGIS_RUNTIME_DEPENDENCY_MAP.md
+docs/aegis/AEGIS_RUNTIME_SUITE_ALIGNMENT.md
+docs/aegis/AEGIS_RUNTIME_RENDERED_VS_OWNED_SURFACES.md
+docs/aegis/AEGIS_RUNTIME_SYSTEM_BOUNDARY.md
+docs/riskdna/RISKDNA_AEGIS_BOUNDARY.md
+docs/riskdna/RISKDNA_SYSTEM_OF_RECORD_MAP.md
+docs/riskdna/RISKDNA_RUNTIME_DEPENDENCY_CONTRACT.md
+docs/cross-platform/AEGIS_BASELINE_INHERITANCE_NORMALIZATION.md
+sentinel/AEGIS_INTEGRATION_REBASELINE.md
+
+Agent 5 exit position:
+
+The Composition Layer baseline is recorded as planning evidence.
+
+Composition may consume Aegis Runtime as a bounded runtime signal and
+evidence/rendering participant, RiskDNA as runtime risk context, Runtime as
+token/session/audit/observability substrate, OPA as policy decision authority,
+and SENTINEL as Kubernetes adapter boundary.
+
+This record does not claim package decomposition, Helm toggles, production
+composition routing, or final doctrine updates are complete.
+
