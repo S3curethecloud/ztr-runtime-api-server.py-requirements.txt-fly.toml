@@ -1,6 +1,6 @@
 # Aegis Runtime Doctrine Update Readiness
 
-Status: Doctrine Update Agent / Readiness Package In Progress
+Status: Doctrine Update Agent / Evidence Recorded
 
 ## Purpose
 
@@ -120,3 +120,53 @@ Current conclusion
 Doctrine update readiness is achieved at the runtime-repo evidence level.
 
 Canonical doctrine should not be changed until the doctrine-control-plane first-read files are inspected and a governed doctrine phase is opened.
+
+
+## Doctrine Update Agent Evidence Record
+
+Status: Doctrine Update Agent Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+ae62832 — Record Aegis runtime Agent 1 evidence status
+ac6758e — Add Aegis runtime SOC 2 control alignment docs
+2e1195b — Record Aegis runtime Agent 2 evidence status
+a35869e — Add RiskDNA Aegis boundary alignment docs
+36239bf — Record RiskDNA Aegis alignment evidence status
+0215863 — Add Aegis baseline inheritance normalization docs
+edc4276 — Record Aegis baseline inheritance evidence status
+801a0ed — Add SENTINEL Aegis integration rebaseline
+2918bf0 — Record SENTINEL Aegis rebaseline evidence status
+700215b — Add Aegis runtime composition baseline
+d6f2842 — Record Aegis runtime composition evidence status
+6a02bc8 — Add Aegis runtime packaging reality
+c941979 — Record Aegis runtime packaging evidence status
+afaf203 — Add Aegis runtime doctrine update readiness package
+
+Runtime-side gate exit position:
+
+Aegis Runtime alignment evidence is complete at the runtime-repository level.
+
+The repository now contains evidence-backed alignment records for Aegis Runtime
+inventory, ownership, dependency mapping, SOC 2-aligned control readiness,
+RiskDNA boundaries, cross-platform inheritance normalization, SENTINEL handoff,
+Composition Layer baseline, packaging reality, and canonical doctrine update
+readiness.
+
+Canonical doctrine-control-plane updates remain pending and must occur in the
+doctrine-control-plane repository after first-read validation and a governed
+doctrine phase.
+
+Final non-claims:
+
+This runtime-side package does not claim SOC 2 certification.
+This runtime-side package does not claim production operating effectiveness.
+This runtime-side package does not claim Aegis or RiskDNA are independent Helm toggles.
+This runtime-side package does not claim canonical doctrine has been updated.
+This runtime-side package does not claim SENTINEL repository implementation has changed.
+This runtime-side package does not claim ASZ/Blackbox/Kubernetes copied-file inheritance is fully proven.
+
