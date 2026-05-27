@@ -1,6 +1,6 @@
 # Aegis Runtime System Boundary
 
-Status: Agent 2 / SOC 2 Control Alignment In Progress
+Status: Agent 2 / Evidence Recorded
 
 ## Purpose
 
@@ -70,3 +70,44 @@ Boundary conclusion
 Aegis Runtime is a bounded signal, evidence, and rendering participant inside a coupled runtime.
 
 It is not the whole runtime, not the enforcement authority, not the policy decision authority, and not the production control plane.
+
+
+## Agent 2 Evidence Record
+
+Status: Agent 2 Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+ae62832 — Record Aegis runtime Agent 1 evidence status
+ac6758e — Add Aegis runtime SOC 2 control alignment docs
+
+Evidence inputs:
+
+docs/aegis/AEGIS_RUNTIME_INVENTORY.md
+docs/aegis/AEGIS_RUNTIME_OWNERSHIP_SPLIT.md
+docs/aegis/AEGIS_RUNTIME_DEPENDENCY_MAP.md
+docs/aegis/AEGIS_RUNTIME_SUITE_ALIGNMENT.md
+docs/aegis/AEGIS_RUNTIME_SOC2_ALIGNMENT.md
+docs/aegis/AEGIS_RUNTIME_RENDERED_VS_OWNED_SURFACES.md
+docs/aegis/AEGIS_RUNTIME_BASELINE_EXPORTS_TO_OTHER_PLATFORMS.md
+docs/aegis/evidence/AEGIS_RUNTIME_ROUTE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_REDIS_STATE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_RISKDNA_AEGIS_OPA_FLOW_EVIDENCE.md
+
+Agent 2 exit position:
+
+Aegis Runtime control scope, control ownership, evidence mapping, change
+management, and system boundary are recorded as SOC 2-aligned readiness
+evidence.
+
+This record does not claim SOC 2 certification, independent audit completion,
+production operating effectiveness, or final compliance readiness.
+
+Remaining downstream work is reserved for RiskDNA boundary alignment,
+cross-platform inheritance normalization, SENTINEL re-baselining, Composition
+Layer readiness, Helm/package scope, and doctrine updates.
+
