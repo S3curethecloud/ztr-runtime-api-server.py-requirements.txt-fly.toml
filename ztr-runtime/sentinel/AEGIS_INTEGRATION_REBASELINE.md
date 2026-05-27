@@ -1,6 +1,6 @@
 # SENTINEL Aegis Integration Re-baseline
 
-Status: Agent 4 / SENTINEL Re-baseline In Progress
+Status: Agent 4 / Evidence Recorded
 
 ## Purpose
 
@@ -89,3 +89,46 @@ Pending SENTINEL repository action
 A future SENTINEL-repo phase may update SENTINEL-owned documentation to consume this Aegis-side re-baseline.
 
 Until that happens, this file is an Aegis-runtime-side handoff baseline only.
+
+
+## Agent 4 Evidence Record
+
+Status: Agent 4 Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+ae62832 — Record Aegis runtime Agent 1 evidence status
+ac6758e — Add Aegis runtime SOC 2 control alignment docs
+2e1195b — Record Aegis runtime Agent 2 evidence status
+a35869e — Add RiskDNA Aegis boundary alignment docs
+36239bf — Record RiskDNA Aegis alignment evidence status
+0215863 — Add Aegis baseline inheritance normalization docs
+edc4276 — Record Aegis baseline inheritance evidence status
+801a0ed — Add SENTINEL Aegis integration rebaseline
+
+Evidence inputs:
+
+docs/aegis/AEGIS_RUNTIME_INVENTORY.md
+docs/aegis/AEGIS_RUNTIME_OWNERSHIP_SPLIT.md
+docs/aegis/AEGIS_RUNTIME_DEPENDENCY_MAP.md
+docs/aegis/AEGIS_RUNTIME_SYSTEM_BOUNDARY.md
+docs/riskdna/RISKDNA_AEGIS_BOUNDARY.md
+docs/riskdna/RISKDNA_RUNTIME_DEPENDENCY_CONTRACT.md
+docs/cross-platform/KUBERNETES_FROM_AEGIS_BASELINE_MAP.md
+docs/cross-platform/AEGIS_BASELINE_INHERITANCE_NORMALIZATION.md
+docs/aegis/evidence/AEGIS_RUNTIME_ROUTE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_RISKDNA_AEGIS_OPA_FLOW_EVIDENCE.md
+
+Agent 4 exit position:
+
+The Aegis-side SENTINEL integration baseline is recorded.
+
+This record does not claim the SENTINEL repository has been updated. It states
+the contract SENTINEL should consume in a future SENTINEL-owned phase:
+Aegis informs, RiskDNA informs, OPA decides, SENTINEL controls Kubernetes
+runtime adapter boundaries, and Runtime owns token/session side effects.
+
