@@ -1,6 +1,6 @@
 # RiskDNA / Aegis Boundary
 
-Status: Agent 3 / RiskDNA Alignment In Progress
+Status: Agent 3 / Evidence Recorded
 
 ## Purpose
 
@@ -84,3 +84,44 @@ Current conclusion
 RiskDNA can be described as its own logical module, but not yet as fully separated code.
 
 Aegis rendering responsibilities and Aegis-owned signal responsibilities must remain explicit to prevent RiskDNA from being confused with Aegis Runtime Core.
+
+
+## Agent 3 Evidence Record
+
+Status: Agent 3 Evidence Recorded
+
+Evidence commits:
+
+```text
+0a07fa6 — Add Aegis runtime phase 1 truth anchor docs
+f06cab9 — Add Aegis runtime Agent 1 alignment docs
+6b76a29 — Add Aegis runtime Agent 1 verification evidence
+ae62832 — Record Aegis runtime Agent 1 evidence status
+ac6758e — Add Aegis runtime SOC 2 control alignment docs
+2e1195b — Record Aegis runtime Agent 2 evidence status
+a35869e — Add RiskDNA Aegis boundary alignment docs
+
+Evidence inputs:
+
+docs/aegis/AEGIS_RUNTIME_INVENTORY.md
+docs/aegis/AEGIS_RUNTIME_OWNERSHIP_SPLIT.md
+docs/aegis/AEGIS_RUNTIME_DEPENDENCY_MAP.md
+docs/aegis/AEGIS_RUNTIME_RENDERED_VS_OWNED_SURFACES.md
+docs/aegis/AEGIS_RUNTIME_CONTROL_SCOPE.md
+docs/aegis/AEGIS_RUNTIME_CONTROL_OWNERSHIP_MATRIX.md
+docs/aegis/AEGIS_RUNTIME_SYSTEM_BOUNDARY.md
+docs/aegis/evidence/AEGIS_RUNTIME_ROUTE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_REDIS_STATE_EVIDENCE.md
+docs/aegis/evidence/AEGIS_RUNTIME_RISKDNA_AEGIS_OPA_FLOW_EVIDENCE.md
+
+Agent 3 exit position:
+
+RiskDNA is now documented as a separable logical module without claiming it is
+fully separated in code.
+
+RiskDNA-owned scoring, blast-radius, topology-risk, recent-window-risk, and
+runtime dependency responsibilities are separated from Aegis-owned bounded
+signals and Aegis-rendered surfaces.
+
+Runtime and OPA ownership boundaries remain preserved.
+
